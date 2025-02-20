@@ -1,4 +1,4 @@
-# main2.py
+# main.py
 print("1️⃣ Importing libraries...")  # Debug step 1
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -15,13 +15,13 @@ logger = logging.getLogger(__name__)
 
 print("3️⃣ Importing research_recommender2...")  # Debug step 3
 try:
-    from research_reccomender2 import ArxivFetcher, EmbeddingSystem
+    from research_recommender import ArxivFetcher, EmbeddingSystem
     print("✅ Successfully imported research_recommender2")
 except ImportError as e:
     print(f"❌ ImportError: {e}")
     # Fix typographical error in the import name if needed
     try:
-        from research_reccomender2 import ArxivFetcher, EmbeddingSystem
+        from research_recommender import ArxivFetcher, EmbeddingSystem
         print("✅ Successfully imported with alternate spelling: research_reccomender2")
     except ImportError:
         raise
@@ -122,4 +122,4 @@ if __name__ == "__main__":
     print("🔟 Starting Uvicorn server...")  # Debug step 10
     logger.info("Starting server...")
     # Use the string reference format for proper reload support
-    uvicorn.run("main2:app", host="0.0.0.0", port=8000, reload=True)
+    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
