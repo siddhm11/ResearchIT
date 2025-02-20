@@ -1,0 +1,444 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Research Paper Recommender</title>
+    <style>
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            line-height: 1.6;
+            color: #333;
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 20px;
+            background-color: #f5f7fa;
+        }
+        .container {
+            background-color: white;
+            border-radius: 8px;
+            box-shadow: 0 2px 10px rgba(0, 0, 0, 0.1);
+            padding: 30px;
+            margin-bottom: 20px;
+        }
+        h1 {
+            color: #2c3e50;
+            margin-top: 0;
+        }
+        .tab-container {
+            margin-bottom: 20px;
+        }
+        .tab {
+            background-color: #f1f5f9;
+            border: none;
+            outline: none;
+            cursor: pointer;
+            padding: 10px 20px;
+            font-size: 16px;
+            border-radius: 4px 4px 0 0;
+            margin-right: 5px;
+            transition: 0.3s;
+        }
+        .tab.active {
+            background-color: #3498db;
+            color: white;
+        }
+        .tab-content {
+            display: none;
+            background-color: white;
+            padding: 20px;
+            border-radius: 0 0 4px 4px;
+            border-top: 3px solid #3498db;
+        }
+        .active-content {
+            display: block;
+        }
+        input, select {
+            width: 100%;
+            padding: 10px;
+            margin: 10px 0 20px 0;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            box-sizing: border-box;
+            font-size: 16px;
+        }
+        button {
+            background-color: #3498db;
+            color: white;
+            border: none;
+            padding: 12px 20px;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 16px;
+            transition: background-color 0.3s;
+        }
+        button:hover {
+            background-color: #2980b9;
+        }
+        .paper-card {
+            background-color: white;
+            border-radius: 8px;
+            box-shadow: 0 2px 6px rgba(0, 0, 0, 0.1);
+            padding: 20px;
+            margin-bottom: 20px;
+            transition: transform 0.2s;
+        }
+        .paper-card:hover {
+            transform: translateY(-3px);
+            box-shadow: 0 4px 8px rgba(0, 0, 0, 0.15);
+        }
+        .paper-title {
+            font-size: 20px;
+            font-weight: 600;
+            color: #2c3e50;
+            margin-top: 0;
+            margin-bottom: 10px;
+        }
+        .paper-meta {
+            font-size: 14px;
+            color: #7f8c8d;
+            margin-bottom: 10px;
+        }
+        .paper-abstract {
+            font-size: 16px;
+            line-height: 1.6;
+            color: #34495e;
+        }
+        .similarity-badge {
+            display: inline-block;
+            background-color: #e74c3c;
+            color: white;
+            padding: 4px 8px;
+            border-radius: 4px;
+            font-size: 14px;
+            font-weight: 600;
+            margin-left: 10px;
+        }
+        .loading {
+            text-align: center;
+            padding: 40px;
+            font-size: 18px;
+            color: #7f8c8d;
+        }
+        .spinner {
+            border: 4px solid rgba(0, 0, 0, 0.1);
+            border-left-color: #3498db;
+            border-radius: 50%;
+            width: 30px;
+            height: 30px;
+            animation: spin 1s linear infinite;
+            margin: 20px auto;
+        }
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+        .error-message {
+            background-color: #fee;
+            color: #e74c3c;
+            padding: 15px;
+            border-radius: 4px;
+            margin-bottom: 20px;
+            border-left: 5px solid #e74c3c;
+        }
+        .rec-from {
+            background-color: #f0f8ff;
+            padding: 10px;
+            border-radius: 4px;
+            margin-top: 20px;
+            border-left: 3px solid #3498db;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Research Paper Recommender</h1>
+        
+        <div class="tab-container">
+            <button class="tab active" onclick="openTab(event, 'search-tab')">Search Papers</button>
+            <button class="tab" onclick="openTab(event, 'recommend-tab')">Get Recommendations</button>
+        </div>
+        
+        <div id="search-tab" class="tab-content active-content">
+            <h2>Search for Research Papers</h2>
+            <div class="form-group">
+                <label for="search-query">Search Query:</label>
+                <input type="text" id="search-query" placeholder="e.g., cat:cs.LG, cat:cs.AI, neural networks, transformers, etc." value="cat:cs.LG">
+            </div>
+            <div class="form-group">
+                <label for="max-results">Max Results:</label>
+                <input type="number" id="max-results" min="1" max="100" value="20">
+            </div>
+            <button onclick="searchPapers()">Search Papers</button>
+            
+            <div id="search-loading" class="loading" style="display: none;">
+                <div class="spinner"></div>
+                <p>Searching for papers...</p>
+            </div>
+            
+            <div id="search-error" class="error-message" style="display: none;"></div>
+            
+            <div id="search-results" class="results-container"></div>
+        </div>
+        
+        <div id="recommend-tab" class="tab-content">
+            <h2>Get Paper Recommendations</h2>
+            <div class="form-group">
+                <label for="recommend-type">Recommend Based On:</label>
+                <select id="recommend-type" onchange="toggleRecommendInputs()">
+                    <option value="text">Text Description</option>
+                    <option value="paper">Selected Paper</option>
+                </select>
+            </div>
+            
+            <div id="text-input-container">
+                <div class="form-group">
+                    <label for="recommend-text">Enter Text Description:</label>
+                    <input type="text" id="recommend-text" placeholder="e.g., Deep learning models for computer vision tasks">
+                </div>
+            </div>
+            
+            <div id="paper-input-container" style="display: none;">
+                <div class="form-group">
+                    <label for="recommend-paper-id">Paper ID:</label>
+                    <input type="text" id="recommend-paper-id" placeholder="e.g., 2202.01110">
+                </div>
+            </div>
+            
+            <div class="form-group">
+                <label for="k-results">Number of Recommendations:</label>
+                <input type="number" id="k-results" min="1" max="20" value="5">
+            </div>
+            
+            <button onclick="getRecommendations()">Get Recommendations</button>
+            
+            <div id="recommend-loading" class="loading" style="display: none;">
+                <div class="spinner"></div>
+                <p>Finding recommendations...</p>
+            </div>
+            
+            <div id="recommend-error" class="error-message" style="display: none;"></div>
+            
+            <div id="recommend-results" class="results-container"></div>
+        </div>
+    </div>
+
+    <script>
+        // Set your API base URL here
+        const API_BASE_URL = 'http://localhost:8000';
+        let searchedPapers = [];
+        
+        function openTab(evt, tabName) {
+            const tabContents = document.getElementsByClassName('tab-content');
+            for (let i = 0; i < tabContents.length; i++) {
+                tabContents[i].classList.remove('active-content');
+            }
+            
+            const tabs = document.getElementsByClassName('tab');
+            for (let i = 0; i < tabs.length; i++) {
+                tabs[i].classList.remove('active');
+            }
+            
+            document.getElementById(tabName).classList.add('active-content');
+            evt.currentTarget.classList.add('active');
+        }
+        
+        function toggleRecommendInputs() {
+            const recommendType = document.getElementById('recommend-type').value;
+            document.getElementById('text-input-container').style.display = 
+                recommendType === 'text' ? 'block' : 'none';
+            document.getElementById('paper-input-container').style.display = 
+                recommendType === 'paper' ? 'block' : 'none';
+        }
+        
+        function formatDate(dateStr) {
+            const date = new Date(dateStr);
+            return date.toLocaleDateString('en-US', {
+                year: 'numeric',
+                month: 'short',
+                day: 'numeric'
+            });
+        }
+        
+        function renderPaperCard(paper, container, showRecommendButton = true, sourcePaper = null) {
+            const paperCard = document.createElement('div');
+            paperCard.className = 'paper-card';
+            
+            let paperHtml = `
+                <h3 class="paper-title">${paper.title}`;
+                
+            if (paper.similarity !== undefined && paper.similarity !== null) {
+                const similarityPercentage = Math.round(paper.similarity * 100);
+                paperHtml += `<span class="similarity-badge">${similarityPercentage}% Match</span>`;
+            }
+            
+            paperHtml += `</h3>
+                <div class="paper-meta">
+                    <strong>Authors:</strong> ${paper.authors.join(', ')} | 
+                    <strong>Published:</strong> ${formatDate(paper.published)} | 
+                    <strong>ID:</strong> ${paper.id}
+                </div>
+                <div class="paper-abstract">${paper.abstract}</div>
+            `;
+            
+            if (sourcePaper) {
+                paperHtml += `<div class="rec-from">Recommendation based on: ${sourcePaper.title}</div>`;
+            }
+            
+            if (showRecommendButton) {
+                paperHtml += `<div style="margin-top: 15px;">
+                    <button onclick="recommendFromPaper('${paper.id}')">Get Similar Papers</button>
+                </div>`;
+            }
+            
+            paperCard.innerHTML = paperHtml;
+            container.appendChild(paperCard);
+        }
+        
+        async function searchPapers() {
+            const query = document.getElementById('search-query').value;
+            const maxResults = document.getElementById('max-results').value;
+            
+            if (!query) {
+                alert('Please enter a search query');
+                return;
+            }
+            
+            const resultsContainer = document.getElementById('search-results');
+            const loadingElement = document.getElementById('search-loading');
+            const errorElement = document.getElementById('search-error');
+            
+            resultsContainer.innerHTML = '';
+            errorElement.style.display = 'none';
+            loadingElement.style.display = 'block';
+            
+            try {
+                const response = await fetch(`${API_BASE_URL}/search`, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({
+                        query: query,
+                        max_results: parseInt(maxResults)
+                    })
+                });
+                
+                if (!response.ok) {
+                    const errorData = await response.json();
+                    throw new Error(errorData.detail || 'Failed to search papers');
+                }
+                
+                searchedPapers = await response.json();
+                
+                if (searchedPapers.length === 0) {
+                    resultsContainer.innerHTML = '<p>No papers found matching your query.</p>';
+                } else {
+                    const resultsHeader = document.createElement('h3');
+                    resultsHeader.textContent = `Found ${searchedPapers.length} Papers`;
+                    resultsContainer.appendChild(resultsHeader);
+                    
+                    searchedPapers.forEach(paper => {
+                        renderPaperCard(paper, resultsContainer);
+                    });
+                }
+            } catch (error) {
+                console.error('Error searching papers:', error);
+                errorElement.textContent = `Error: ${error.message}`;
+                errorElement.style.display = 'block';
+            } finally {
+                loadingElement.style.display = 'none';
+            }
+        }
+        
+        function recommendFromPaper(paperId) {
+            document.getElementById('recommend-tab').classList.add('active-content');
+            document.getElementById('search-tab').classList.remove('active-content');
+            
+            const tabs = document.getElementsByClassName('tab');
+            tabs[0].classList.remove('active');
+            tabs[1].classList.add('active');
+            
+            document.getElementById('recommend-type').value = 'paper';
+            toggleRecommendInputs();
+            document.getElementById('recommend-paper-id').value = paperId;
+            
+            getRecommendations();
+        }
+        
+        async function getRecommendations() {
+            const recommendType = document.getElementById('recommend-type').value;
+            const kResults = document.getElementById('k-results').value;
+            
+            let requestBody = {
+                k: parseInt(kResults)
+            };
+            
+            if (recommendType === 'text') {
+                const text = document.getElementById('recommend-text').value;
+                if (!text) {
+                    alert('Please enter a text description');
+                    return;
+                }
+                requestBody.text = text;
+            } else {
+                const paperId = document.getElementById('recommend-paper-id').value;
+                if (!paperId) {
+                    alert('Please enter a paper ID');
+                    return;
+                }
+                requestBody.paper_id = paperId;
+            }
+            
+            const resultsContainer = document.getElementById('recommend-results');
+            const loadingElement = document.getElementById('recommend-loading');
+            const errorElement = document.getElementById('recommend-error');
+            
+            resultsContainer.innerHTML = '';
+            errorElement.style.display = 'none';
+            loadingElement.style.display = 'block';
+            
+            try {
+                const response = await fetch(`${API_BASE_URL}/recommend`, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify(requestBody)
+                });
+                
+                if (!response.ok) {
+                    const errorData = await response.json();
+                    throw new Error(errorData.detail || 'Failed to get recommendations');
+                }
+                
+                const recommendations = await response.json();
+                
+                if (recommendations.length === 0) {
+                    resultsContainer.innerHTML = '<p>No recommendations found.</p>';
+                } else {
+                    const resultsHeader = document.createElement('h3');
+                    resultsHeader.textContent = `Top ${recommendations.length} Recommendations`;
+                    resultsContainer.appendChild(resultsHeader);
+                    
+                    // Find source paper if recommendation was based on paper_id
+                    let sourcePaper = null;
+                    if (requestBody.paper_id) {
+                        sourcePaper = searchedPapers.find(p => p.id === requestBody.paper_id);
+                    }
+                    
+                    recommendations.forEach(paper => {
+                        renderPaperCard(paper, resultsContainer, false, sourcePaper);
+                    });
+                }
+            } catch (error) {
+                console.error('Error getting recommendations:', error);
+                errorElement.textContent = `Error: ${error.message}`;
+                errorElement.style.display = 'block';
+            } finally {
+                loadingElement.style.display = 'none';
+            }
+        }
+    </script>
+</body>
+</html>
