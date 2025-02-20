@@ -6,6 +6,8 @@ import faiss
 import nltk
 from sentence_transformers import SentenceTransformer
 from tenacity import retry, stop_after_attempt, wait_exponential
+from nltk.tokenize import word_tokenize
+from nltk.corpus import stopwords
 
 print("2️⃣ Downloading NLTK resources...")  # Debug step 2
 nltk.download('wordnet')
@@ -67,7 +69,7 @@ class EmbeddingSystem:
             print("⚠️ No papers to process. Skipping FAISS indexing.")
             return
 
-        df['clean_text'] = df['title'] + ' ' + df['abstract'].str[:1000]  # Limit abstract to 1000 chars
+        df['clean_text'] = df['title'] + ' [SEP] ' + df['abstract']  # Limit abstract to 1000 chars
         embeddings = self.generate_embeddings(df['clean_text'].tolist())  # Convert text to embeddings
 
         print("🔵 Normalizing embeddings for FAISS...")  # Debug step 12
