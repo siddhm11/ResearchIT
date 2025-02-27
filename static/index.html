@@ -148,6 +148,26 @@
             margin-top: 20px;
             border-left: 3px solid #3498db;
         }
+        .category-container {
+            margin-bottom: 20px;
+        }
+        .category-tag {
+            display: inline-block;
+            background-color: #eaf4fe;
+            color: #3498db;
+            padding: 4px 10px;
+            margin-right: 5px;
+            margin-bottom: 5px;
+            border-radius: 20px;
+            font-size: 14px;
+        }
+        .date-range {
+            display: flex;
+            gap: 10px;
+        }
+        .date-range input {
+            width: 48%;
+        }
     </style>
 </head>
 <body>
@@ -163,7 +183,18 @@
             <h2>Search for Research Papers</h2>
             <div class="form-group">
                 <label for="search-query">Search Query:</label>
-                <input type="text" id="search-query" placeholder="e.g., cat:cs.LG, cat:cs.AI, neural networks, transformers, etc." value="cat:cs.LG">
+                <input type="text" id="search-query" placeholder="e.g., neural networks, transformers, etc." value="">
+            </div>
+            <div class="form-group">
+                <label for="categories">Categories (Optional):</label>
+                <input type="text" id="categories" placeholder="e.g., cs.LG, cs.AI (comma separated)">
+            </div>
+            <div class="form-group">
+                <label>Date Range (Optional):</label>
+                <div class="date-range">
+                    <input type="date" id="date-start" placeholder="Start Date">
+                    <input type="date" id="date-end" placeholder="End Date">
+                </div>
             </div>
             <div class="form-group">
                 <label for="max-results">Max Results:</label>
@@ -206,6 +237,14 @@
             </div>
             
             <div class="form-group">
+                <label>Date Range (Optional):</label>
+                <div class="date-range">
+                    <input type="date" id="rec-date-start" placeholder="Start Date">
+                    <input type="date" id="rec-date-end" placeholder="End Date">
+                </div>
+            </div>
+            
+            <div class="form-group">
                 <label for="k-results">Number of Recommendations:</label>
                 <input type="number" id="k-results" min="1" max="20" value="5">
             </div>
@@ -224,9 +263,25 @@
     </div>
 
     <script>
-        // Set your API base URL here
-        const API_BASE_URL = 'http://localhost:8000';
+        // Use an empty string for API_BASE_URL since we're using the same origin
+        const API_BASE_URL = '';
         let searchedPapers = [];
+        
+        // Check API status on page load
+        document.addEventListener('DOMContentLoaded', async function() {
+            try {
+                const response = await fetch(`${API_BASE_URL}/api-info`);
+                const apiStatus = await response.json();
+                
+                if (!apiStatus.components_initialized) {
+                    const errorElement = document.getElementById('search-error');
+                    errorElement.textContent = "Warning: API components are not fully initialized. Some features may not work correctly.";
+                    errorElement.style.display = 'block';
+                }
+            } catch (error) {
+                console.warn("Could not check API status:", error);
+            }
+        });
         
         function openTab(evt, tabName) {
             const tabContents = document.getElementsByClassName('tab-content');
@@ -252,6 +307,7 @@
         }
         
         function formatDate(dateStr) {
+            if (!dateStr) return "N/A";
             const date = new Date(dateStr);
             return date.toLocaleDateString('en-US', {
                 year: 'numeric',
@@ -276,10 +332,24 @@
                 <div class="paper-meta">
                     <strong>Authors:</strong> ${paper.authors.join(', ')} | 
                     <strong>Published:</strong> ${formatDate(paper.published)} | 
-                    <strong>ID:</strong> ${paper.id}
-                </div>
-                <div class="paper-abstract">${paper.abstract}</div>
-            `;
+                    <strong>ID:</strong> ${paper.id}`;
+                    
+            if (paper.pdf_url) {
+                paperHtml += ` | <a href="${paper.pdf_url}" target="_blank">PDF</a>`;
+            }
+            
+            paperHtml += `</div>`;
+            
+            // Add categories if available
+            if (paper.categories && paper.categories.length > 0) {
+                paperHtml += `<div class="category-container">`;
+                paper.categories.forEach(category => {
+                    paperHtml += `<span class="category-tag">${category}</span>`;
+                });
+                paperHtml += `</div>`;
+            }
+            
+            paperHtml += `<div class="paper-abstract">${paper.abstract}</div>`;
             
             if (sourcePaper) {
                 paperHtml += `<div class="rec-from">Recommendation based on: ${sourcePaper.title}</div>`;
@@ -298,6 +368,9 @@
         async function searchPapers() {
             const query = document.getElementById('search-query').value;
             const maxResults = document.getElementById('max-results').value;
+            const categoriesInput = document.getElementById('categories').value;
+            const dateStart = document.getElementById('date-start').value;
+            const dateEnd = document.getElementById('date-end').value;
             
             if (!query) {
                 alert('Please enter a search query');
@@ -313,15 +386,33 @@
             loadingElement.style.display = 'block';
             
             try {
+                // Prepare request payload
+                const requestBody = {
+                    query: query,
+                    max_results: parseInt(maxResults)
+                };
+                
+                // Add categories if provided
+                if (categoriesInput) {
+                    const categories = categoriesInput.split(',').map(cat => cat.trim());
+                    if (categories.length > 0) {
+                        requestBody.categories = categories;
+                    }
+                }
+                
+                // Add date range if provided
+                if (dateStart || dateEnd) {
+                    requestBody.date_range = {};
+                    if (dateStart) requestBody.date_range.start_date = dateStart;
+                    if (dateEnd) requestBody.date_range.end_date = dateEnd;
+                }
+                
                 const response = await fetch(`${API_BASE_URL}/search`, {
                     method: 'POST',
                     headers: {
                         'Content-Type': 'application/json'
                     },
-                    body: JSON.stringify({
-                        query: query,
-                        max_results: parseInt(maxResults)
-                    })
+                    body: JSON.stringify(requestBody)
                 });
                 
                 if (!response.ok) {
@@ -369,10 +460,19 @@
         async function getRecommendations() {
             const recommendType = document.getElementById('recommend-type').value;
             const kResults = document.getElementById('k-results').value;
+            const dateStart = document.getElementById('rec-date-start').value;
+            const dateEnd = document.getElementById('rec-date-end').value;
             
             let requestBody = {
                 k: parseInt(kResults)
             };
+            
+            // Add date range if provided
+            if (dateStart || dateEnd) {
+                requestBody.date_range = {};
+                if (dateStart) requestBody.date_range.start_date = dateStart;
+                if (dateEnd) requestBody.date_range.end_date = dateEnd;
+            }
             
             if (recommendType === 'text') {
                 const text = document.getElementById('recommend-text').value;
