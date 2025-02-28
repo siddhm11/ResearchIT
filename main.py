@@ -1,11 +1,13 @@
+
+
 """
 Research Paper Recommender API
-FastAPI application that integrates with the ResearchRecommender
+FastAPI application that integrates with the ResearchRecommender system
 to provide paper search and recommendation capabilities.
 """
 import os
 import time
-import traceback
+import json
 from datetime import datetime
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException, Request, BackgroundTasks, Depends, status
@@ -17,31 +19,32 @@ from typing import List, Optional, Dict, Any, Union
 import uvicorn
 import logging
 import logging.handlers
+import traceback
+import logging
+import sys
 
-# Configure logging with rotation to prevent large log files
-LOG_DIR = "logs"
-os.makedirs(LOG_DIR, exist_ok=True)
-log_file = os.path.join(LOG_DIR, "app.log")
+# Ensure UTF-8 encoding for logs
+sys.stdout.reconfigure(encoding='utf-8')
 
 # Create formatter
-formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s',)
 
-# Set up rotating file handler
-file_handler = logging.handlers.RotatingFileHandler(
-    log_file, maxBytes=10*1024*1024, backupCount=5
-)
-file_handler.setFormatter(formatter)
-
-# Set up console handler
+# Set up console handler with UTF-8 encoding
 console_handler = logging.StreamHandler()
 console_handler.setFormatter(formatter)
 
 # Configure root logger
 logging.basicConfig(
     level=logging.INFO,
-    handlers=[file_handler, console_handler],
+    handlers=[console_handler],  # Add file_handler if needed
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
+
+# Configure logging with rotation to prevent large log files
+LOG_DIR = "logs"
+os.makedirs(LOG_DIR, exist_ok=True)
+log_file = os.path.join(LOG_DIR, "app.log")
+
 
 logger = logging.getLogger("research_api")
 
@@ -62,28 +65,39 @@ async def lifespan(app: FastAPI):
     # Startup
     logger.info("Initializing components...")
     try:
-        from researchpaper_recommender import ResearchRecommender
+        # Import the ResearchRecommender class directly from the module
+        from research_recommender import ResearchRecommender
         
         global recommender
-        recommender = ResearchRecommender(
-            use_faster_model=True,
-            load_existing=True
-        )
+        recommender = ResearchRecommender()
         
-        logger.info("✅ Components initialized successfully")
+        # Load existing index if available
+        try:
+            recommender.load_index("research_index")
+            logger.info("Loaded existing research index")
+        except Exception as e:
+            logger.warning(f"Could not load existing index: {e}")
+        
+        logger.info("  Components initialized successfully")
         yield
     except ImportError as e:
-        logger.error(f"❌ Failed to import required modules: {e}")
+        logger.error(f"   Failed to import required modules: {e}")
+        # Still start the app, but with limited functionality
         yield
     except Exception as e:
-        logger.error(f"❌ Error during initialization: {e}")
+        logger.error(f"   Error during initialization: {e}")
         logger.error(traceback.format_exc())
         yield
     
     # Shutdown
     logger.info("Shutting down components...")
-    if recommender:
-        recommender.save_state()
+    # Save the index on shutdown
+    if recommender and recommender.embedding_system.index.ntotal > 0:
+        try:
+            recommender.save_index("research_index")
+            logger.info("Saved research index")
+        except Exception as e:
+            logger.error(f"Error saving index: {e}")
     logger.info("Components shut down")
 
 # Initialize the API
@@ -136,8 +150,8 @@ app.mount("/static", StaticFiles(directory="static"), name="static")
 # Dependency to verify components are loaded
 def verify_components():
     if recommender is None:
-        logger.error("Recommender not initialized")
-        raise HTTPException(status_code=503, detail="Service temporarily unavailable. Recommender not initialized.")
+        logger.error("Components not initialized")
+        raise HTTPException(status_code=503, detail="Service temporarily unavailable. Components not initialized.")
     return True
 
 # Pydantic models
@@ -172,11 +186,10 @@ class SearchRequest(BaseModel):
 class RecommendRequest(BaseModel):
     text: Optional[str] = Field(None, description="Text to find similar papers to")
     paper_id: Optional[str] = Field(None, description="Paper ID to find similar papers to")
-    user_id: Optional[str] = Field(None, description="User ID for personalized recommendations")
     k: int = Field(API_SETTINGS["default_recommendations"], 
-                 description=f"Number of recommendations to return")
-    date_range: Optional[DateRange] = Field(None, description="Optional date range for filtering")
-    include_quality: bool = Field(True, description="Include quality assessment in results")
+                 description=f"Number of recommendations to return (default: {API_SETTINGS['default_recommendations']})")
+    date_range: Optional[DateRange] = Field(None, description="Optional date range for filtering recommendations")
+    quality_aware: bool = Field(True, description="Whether to use quality assessment in ranking")
     
     @validator('k')
     def validate_k(cls, v):
@@ -185,11 +198,25 @@ class RecommendRequest(BaseModel):
         if v > API_SETTINGS["max_allowed_results"]:
             return API_SETTINGS["max_allowed_results"]
         return v
+    
+    @validator('text', 'paper_id')
+    def validate_input(cls, v, values):
+        # Ensure either text or paper_id is provided
+        if 'text' not in values and 'paper_id' not in values:
+            raise ValueError('Either text or paper_id must be provided')
+        return v
 
-class UserInteractionRequest(BaseModel):
-    user_id: str
-    paper_id: str
-    interaction_type: str = Field(..., description="Type of interaction: 'view', 'like', 'dislike', 'save', 'cite'")
+class SeminalPapersRequest(BaseModel):
+    topic: str = Field(..., description="Research topic to find seminal papers for")
+    max_results: int = Field(10, description="Maximum number of papers to return")
+    
+    @validator('max_results')
+    def validate_max_results(cls, v):
+        if v < 1:
+            return 10
+        if v > API_SETTINGS["max_allowed_results"]:
+            return API_SETTINGS["max_allowed_results"]
+        return v
 
 class Paper(BaseModel):
     id: str
@@ -201,8 +228,6 @@ class Paper(BaseModel):
     categories: Optional[List[str]] = None
     similarity: Optional[float] = None
     quality_score: Optional[float] = None
-    combined_score: Optional[float] = None
-    citation_count: Optional[int] = None
     
     class Config:
         schema_extra = {
@@ -215,8 +240,7 @@ class Paper(BaseModel):
                 "pdf_url": "https://arxiv.org/pdf/2301.12345.pdf",
                 "categories": ["cs.LG", "cs.CL"],
                 "similarity": 0.92,
-                "quality_score": 0.85,
-                "combined_score": 0.89
+                "quality_score": 0.85
             }
         }
 
@@ -252,7 +276,9 @@ async def search_papers(
     background_tasks: BackgroundTasks,
     _: bool = Depends(verify_components)
 ):
-    """Search for papers based on a query and optional filters"""
+    """
+    Search for papers based on a query and optional filters
+    """
     logger.info(f"Received search request: {request.dict()}")
     try:
         # Prepare date parameters if provided
@@ -262,18 +288,29 @@ async def search_papers(
             date_start = request.date_range.start_date
             date_end = request.date_range.end_date
         
-        # Fetch papers using the ResearchRecommender
-        papers_df = recommender.fetch_papers(
-            query=request.query,
-            categories=request.categories,
+        # Build the query with categories if provided
+        final_query = request.query
+        if request.categories:
+            cat_query = " OR ".join([f"cat:{cat}" for cat in request.categories])
+            final_query = f"({request.query}) AND ({cat_query})"
+        
+        # Fetch papers using the recommender
+        start_time = time.time()
+        papers_df = recommender.fetch_and_index(
+            query=final_query, 
             max_results=request.max_results,
             date_start=date_start,
             date_end=date_end
         )
+        fetch_time = time.time() - start_time
+        logger.info(f"Fetched {len(papers_df)} papers in {fetch_time:.2f} seconds")
         
         if papers_df.empty:
-            logger.warning(f"No papers found for query: {request.query}")
+            logger.warning(f"No papers found for query: {final_query}")
             return []
+        
+        # Ensure date is properly formatted as string
+        papers_df['published'] = papers_df['published'].astype(str)
         
         # Convert DataFrame to list of Paper models
         papers = []
@@ -283,7 +320,7 @@ async def search_papers(
                 title=row['title'],
                 abstract=row['abstract'],
                 authors=row['authors'],
-                published=str(row['published']),
+                published=row['published'],
                 pdf_url=row.get('pdf_url'),
                 categories=row.get('categories', [])
             )
@@ -304,47 +341,51 @@ async def get_recommendations(
     request: RecommendRequest,
     _: bool = Depends(verify_components)
 ):
-    """Get paper recommendations with quality assessment"""
+    """
+    Get paper recommendations based on text or a paper ID
+    """
     logger.info(f"Received recommendation request")
     try:
-        # Prepare filter criteria if date range is provided
-        filter_criteria = None
-        if request.date_range:
-            filter_criteria = {
-                'published': {
-                    'min': request.date_range.start_date,
-                    'max': request.date_range.end_date
-                }
-            }
-        
-        # Get recommendations
-        recommendations = recommender.get_recommendations(
+        # Get recommendations using the recommender
+        recommendations = recommender.recommend(
             text=request.text,
             paper_id=request.paper_id,
-            user_id=request.user_id,
             k=request.k,
-            filter_criteria=filter_criteria,
-            include_quality=request.include_quality
+            min_date=request.date_range.start_date if request.date_range else None,
+            max_date=request.date_range.end_date if request.date_range else None,
+            quality_aware=request.quality_aware
         )
         
         if recommendations.empty:
             logger.warning("No recommendations found")
             return []
         
+        # Ensure date is properly formatted as string
+        if 'published' in recommendations.columns:
+            recommendations['published'] = recommendations['published'].astype(str)
+        
         # Convert to Paper models
         papers = []
         for _, row in recommendations.iterrows():
+            # Determine which similarity field to use
+            similarity = None
+            if 'combined_score' in row:
+                similarity = float(row['combined_score'])
+            elif 'similarity_score' in row:
+                similarity = float(row['similarity_score'])
+                
+            quality_score = float(row['quality_score']) if 'quality_score' in row else None
+                
             paper = Paper(
                 id=row['id'],
                 title=row['title'],
                 abstract=row['abstract'],
                 authors=row['authors'],
-                published=str(row['published']),
+                published=row['published'],
                 pdf_url=row.get('pdf_url'),
                 categories=row.get('categories', []),
-                similarity=float(row['similarity_score']) if 'similarity_score' in row else None,
-                quality_score=float(row['quality_score']) if 'quality_score' in row else None,
-                combined_score=float(row['combined_score']) if 'combined_score' in row else None
+                similarity=similarity,
+                quality_score=quality_score
             )
             papers.append(paper)
             
@@ -358,93 +399,136 @@ async def get_recommendations(
             detail=f"Error processing recommendation request: {str(e)}"
         )
 
-@app.post("/user/interaction")
-async def record_interaction(
-    request: UserInteractionRequest,
+@app.post("/seminal-papers", response_model=List[Paper])
+async def find_seminal_papers(
+    request: SeminalPapersRequest,
     _: bool = Depends(verify_components)
 ):
-    """Record user interaction with a paper"""
+    """
+    Find seminal papers on a topic
+    """
+    logger.info(f"Received seminal papers request for topic: {request.topic}")
     try:
-        recommender.record_user_interaction(
-            user_id=request.user_id,
-            paper_id=request.paper_id,
-            interaction_type=request.interaction_type
+        # Get seminal papers using the recommender
+        papers_df = recommender.find_seminal_papers(
+            topic=request.topic,
+            max_results=request.max_results
         )
-        return {"status": "success"}
-    except Exception as e:
-        logger.error(f"Error recording interaction: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-@app.get("/user/insights/{user_id}")
-async def get_user_insights(
-    user_id: str,
-    _: bool = Depends(verify_components)
-):
-    """Get insights about user preferences"""
-    try:
-        insights = recommender.get_user_insights(user_id)
-        return insights
-    except Exception as e:
-        logger.error(f"Error getting user insights: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-@app.get("/top-cited")
-async def get_top_cited(
-    query: str,
-    k: int = 5,
-    _: bool = Depends(verify_components)
-):
-    """Get top cited papers for a query"""
-    try:
-        papers_df = recommender.get_top_cited_papers(query, k)
         
         if papers_df.empty:
+            logger.warning(f"No seminal papers found for topic: {request.topic}")
             return []
-            
-        # Convert to Paper models
+        
+        # Ensure date is properly formatted as string
+        papers_df['published'] = papers_df['published'].astype(str)
+        
+        # Convert DataFrame to list of Paper models
         papers = []
         for _, row in papers_df.iterrows():
+            # Get quality score for each paper
+            quality_score = recommender.assess_paper_quality(row['id'])
+            
             paper = Paper(
                 id=row['id'],
                 title=row['title'],
                 abstract=row['abstract'],
                 authors=row['authors'],
-                published=str(row['published']),
+                published=row['published'],
                 pdf_url=row.get('pdf_url'),
                 categories=row.get('categories', []),
-                citation_count=int(row['citation_count'])
+                quality_score=quality_score
             )
             papers.append(paper)
             
         return papers
+        
     except Exception as e:
-        logger.error(f"Error getting top cited papers: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
-@app.get("/paper/quality/{paper_id}")
-async def assess_paper_quality(
+        logger.error(f"Error in find_seminal_papers: {str(e)}")
+        logger.error(traceback.format_exc())
+        raise HTTPException(
+            status_code=500, 
+            detail=f"Error processing seminal papers request: {str(e)}"
+        )
+
+@app.get("/paper-quality/{paper_id}", response_model=Dict[str, float])
+async def get_paper_quality(
     paper_id: str,
     _: bool = Depends(verify_components)
 ):
-    """Assess the quality of a paper"""
+    """
+    Get quality assessment for a specific paper
+    """
+    logger.info(f"Received quality assessment request for paper: {paper_id}")
     try:
         quality_score = recommender.assess_paper_quality(paper_id)
-        return {"paper_id": paper_id, "quality_score": quality_score}
+        return {"quality_score": quality_score}
     except Exception as e:
-        logger.error(f"Error assessing paper quality: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error(f"Error in get_paper_quality: {str(e)}")
+        logger.error(traceback.format_exc())
+        raise HTTPException(
+            status_code=500, 
+            detail=f"Error processing quality assessment request: {str(e)}"
+        )
 
-@app.get("/save-state", status_code=200)
-async def trigger_save_state(
+@app.get("/citation-info/{paper_id}", response_model=Dict[str, Any])
+async def get_citation_info(
+    paper_id: str,
     _: bool = Depends(verify_components)
 ):
-    """Manually trigger state saving"""
+    """
+    Get citation information for a specific paper
+    """
+    logger.info(f"Received citation info request for paper: {paper_id}")
     try:
-        recommender.save_state()
-        return {"status": "success", "message": "State saved successfully"}
+        citation_info = recommender.get_citation_info(paper_id)
+        return citation_info
     except Exception as e:
-        logger.error(f"Error saving state: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error(f"Error in get_citation_info: {str(e)}")
+        logger.error(traceback.format_exc())
+        raise HTTPException(
+            status_code=500, 
+            detail=f"Error processing citation info request: {str(e)}"
+        )
 
-# Run the application when executed directly
+@app.get("/health")
+async def health_check():
+    """
+    Health check endpoint for monitoring services
+    """
+    return {
+        "status": "healthy",
+        "timestamp": datetime.now().isoformat(),
+        "components": {
+            "recommender": recommender is not None,
+            "index_size": recommender.embedding_system.index.ntotal if recommender else 0
+        }
+    }
+
+# Custom exception handler for better error responses
+@app.exception_handler(HTTPException)
+async def http_exception_handler(request, exc):
+    return JSONResponse(
+        status_code=exc.status_code,
+        content={"detail": exc.detail}
+    )
+
+@app.exception_handler(Exception)
+async def general_exception_handler(request, exc):
+    logger.error(f"Unhandled exception: {str(exc)}")
+    logger.error(traceback.format_exc())
+    return JSONResponse(
+        status_code=500,
+        content={"detail": "Internal server error. See logs for details."}
+    )
 if __name__ == "__main__":
-    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
+    logger.info("Starting Uvicorn server...")
+    # Log to stdout as well when running directly
+    uvicorn.run(
+        "main:app", 
+        host="0.0.0.0", 
+        port=8000, 
+        reload=True,
+        log_level="info",
+        workers=4,  # Adjust based on available CPU cores
+        timeout_keep_alive=API_SETTINGS["request_timeout"]
+    )

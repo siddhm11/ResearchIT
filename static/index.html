@@ -114,6 +114,16 @@
             font-weight: 600;
             margin-left: 10px;
         }
+        .quality-badge {
+            display: inline-block;
+            background-color: #27ae60;
+            color: white;
+            padding: 4px 8px;
+            border-radius: 4px;
+            font-size: 14px;
+            font-weight: 600;
+            margin-left: 10px;
+        }
         .loading {
             text-align: center;
             padding: 40px;
@@ -168,6 +178,25 @@
         .date-range input {
             width: 48%;
         }
+        .citation-info {
+            background-color: #f9f9f9;
+            padding: 15px;
+            border-radius: 4px;
+            margin-top: 15px;
+            border-left: 3px solid #95a5a6;
+            display: none;
+        }
+        .form-group {
+            margin-bottom: 15px;
+        }
+        .checkbox-container {
+            display: flex;
+            align-items: center;
+        }
+        .checkbox-container input[type="checkbox"] {
+            width: auto;
+            margin-right: 10px;
+        }
     </style>
 </head>
 <body>
@@ -177,6 +206,7 @@
         <div class="tab-container">
             <button class="tab active" onclick="openTab(event, 'search-tab')">Search Papers</button>
             <button class="tab" onclick="openTab(event, 'recommend-tab')">Get Recommendations</button>
+            <button class="tab" onclick="openTab(event, 'seminal-tab')">Find Seminal Papers</button>
         </div>
         
         <div id="search-tab" class="tab-content active-content">
@@ -249,6 +279,11 @@
                 <input type="number" id="k-results" min="1" max="20" value="5">
             </div>
             
+            <div class="form-group checkbox-container">
+                <input type="checkbox" id="quality-aware" checked>
+                <label for="quality-aware">Use quality assessment in ranking</label>
+            </div>
+            
             <button onclick="getRecommendations()">Get Recommendations</button>
             
             <div id="recommend-loading" class="loading" style="display: none;">
@@ -260,8 +295,31 @@
             
             <div id="recommend-results" class="results-container"></div>
         </div>
+        
+        <div id="seminal-tab" class="tab-content">
+            <h2>Find Seminal Papers</h2>
+            <div class="form-group">
+                <label for="seminal-topic">Research Topic:</label>
+                <input type="text" id="seminal-topic" placeholder="e.g., transformer architecture, reinforcement learning">
+            </div>
+            <div class="form-group">
+                <label for="seminal-max-results">Max Results:</label>
+                <input type="number" id="seminal-max-results" min="1" max="20" value="5">
+            </div>
+            
+            <button onclick="findSeminalPapers()">Find Seminal Papers</button>
+            
+            <div id="seminal-loading" class="loading" style="display: none;">
+                <div class="spinner"></div>
+                <p>Searching for seminal papers...</p>
+            </div>
+            
+            <div id="seminal-error" class="error-message" style="display: none;"></div>
+            
+            <div id="seminal-results" class="results-container"></div>
+        </div>
     </div>
-
+    
     <script>
         // Use an empty string for API_BASE_URL since we're using the same origin
         const API_BASE_URL = '';
@@ -316,6 +374,70 @@
             });
         }
         
+        async function showCitationInfo(paperId, element) {
+            const citationInfoId = `citation-${paperId}`;
+            const citationElement = document.getElementById(citationInfoId);
+            
+            if (citationElement) {
+                // Toggle visibility if already loaded
+                citationElement.style.display = citationElement.style.display === 'none' ? 'block' : 'none';
+                return;
+            }
+            
+            // Create new citation info element
+            const citationInfo = document.createElement('div');
+            citationInfo.id = citationInfoId;
+            citationInfo.className = 'citation-info';
+            citationInfo.innerHTML = '<div class="spinner"></div><p>Loading citation information...</p>';
+            
+            // Insert after the button
+            element.parentNode.insertBefore(citationInfo, element.nextSibling);
+            
+            try {
+                const response = await fetch(`${API_BASE_URL}/citation-info/${paperId}`);
+                
+                if (!response.ok) {
+                    throw new Error('Failed to fetch citation information');
+                }
+                
+                const data = await response.json();
+                
+                let citationHtml = '<h4>Citation Information</h4>';
+                citationHtml += `<p><strong>Citations:</strong> ${data.citation_count || 'Unknown'}</p>`;
+                
+                if (data.influential_citations) {
+                    citationHtml += `<p><strong>Influential Citations:</strong> ${data.influential_citations}</p>`;
+                }
+                
+                if (data.venue) {
+                    citationHtml += `<p><strong>Venue:</strong> ${data.venue}</p>`;
+                }
+                
+                citationHtml += `<p><strong>Last Updated:</strong> ${formatDate(data.last_updated)}</p>`;
+                
+                citationInfo.innerHTML = citationHtml;
+            } catch (error) {
+                console.error('Error fetching citation info:', error);
+                citationInfo.innerHTML = '<p>Error loading citation information.</p>';
+            }
+        }
+        
+        async function getPaperQuality(paperId) {
+            try {
+                const response = await fetch(`${API_BASE_URL}/paper-quality/${paperId}`);
+                
+                if (!response.ok) {
+                    throw new Error('Failed to fetch paper quality');
+                }
+                
+                const data = await response.json();
+                return data.quality_score;
+            } catch (error) {
+                console.error('Error fetching paper quality:', error);
+                return null;
+            }
+        }
+        
         function renderPaperCard(paper, container, showRecommendButton = true, sourcePaper = null) {
             const paperCard = document.createElement('div');
             paperCard.className = 'paper-card';
@@ -323,17 +445,24 @@
             let paperHtml = `
                 <h3 class="paper-title">${paper.title}`;
                 
+            // Show similarity score if available
             if (paper.similarity !== undefined && paper.similarity !== null) {
                 const similarityPercentage = Math.round(paper.similarity * 100);
                 paperHtml += `<span class="similarity-badge">${similarityPercentage}% Match</span>`;
             }
             
-            paperHtml += `</h3>
-                <div class="paper-meta">
-                    <strong>Authors:</strong> ${paper.authors.join(', ')} | 
-                    <strong>Published:</strong> ${formatDate(paper.published)} | 
-                    <strong>ID:</strong> ${paper.id}`;
-                    
+            // Show quality score if available
+            if (paper.quality_score !== undefined && paper.quality_score !== null) {
+                const qualityPercentage = Math.round(paper.quality_score * 100);
+                paperHtml += `<span class="quality-badge">${qualityPercentage}% Quality</span>`;
+            }
+            
+            paperHtml += `</h3>`;
+            paperHtml += `<div class="paper-meta">
+                <strong>Authors:</strong> ${paper.authors.join(', ')} | 
+                <strong>Published:</strong> ${formatDate(paper.published)} | 
+                <strong>ID:</strong> ${paper.id}`;
+            
             if (paper.pdf_url) {
                 paperHtml += ` | <a href="${paper.pdf_url}" target="_blank">PDF</a>`;
             }
@@ -354,10 +483,10 @@
             if (sourcePaper) {
                 paperHtml += `<div class="rec-from">Recommendation based on: ${sourcePaper.title}</div>`;
             }
-            
             if (showRecommendButton) {
                 paperHtml += `<div style="margin-top: 15px;">
                     <button onclick="recommendFromPaper('${paper.id}')">Get Similar Papers</button>
+                    <button onclick="showCitationInfo('${paper.id}', this)" style="margin-left: 10px;">View Citations</button>
                 </div>`;
             }
             
@@ -445,10 +574,12 @@
         function recommendFromPaper(paperId) {
             document.getElementById('recommend-tab').classList.add('active-content');
             document.getElementById('search-tab').classList.remove('active-content');
+            document.getElementById('seminal-tab').classList.remove('active-content');
             
             const tabs = document.getElementsByClassName('tab');
             tabs[0].classList.remove('active');
             tabs[1].classList.add('active');
+            tabs[2].classList.remove('active');
             
             document.getElementById('recommend-type').value = 'paper';
             toggleRecommendInputs();
@@ -462,9 +593,11 @@
             const kResults = document.getElementById('k-results').value;
             const dateStart = document.getElementById('rec-date-start').value;
             const dateEnd = document.getElementById('rec-date-end').value;
+            const qualityAware = document.getElementById('quality-aware').checked;
             
             let requestBody = {
-                k: parseInt(kResults)
+                k: parseInt(kResults),
+                quality_aware: qualityAware
             };
             
             // Add date range if provided
@@ -533,6 +666,64 @@
                 }
             } catch (error) {
                 console.error('Error getting recommendations:', error);
+                errorElement.textContent = `Error: ${error.message}`;
+                errorElement.style.display = 'block';
+            } finally {
+                loadingElement.style.display = 'none';
+            }
+        }
+        
+        async function findSeminalPapers() {
+            const topic = document.getElementById('seminal-topic').value;
+            const maxResults = document.getElementById('seminal-max-results').value;
+            
+            if (!topic) {
+                alert('Please enter a research topic');
+                return;
+            }
+            
+            const resultsContainer = document.getElementById('seminal-results');
+            const loadingElement = document.getElementById('seminal-loading');
+            const errorElement = document.getElementById('seminal-error');
+            
+            resultsContainer.innerHTML = '';
+            errorElement.style.display = 'none';
+            loadingElement.style.display = 'block';
+            
+            try {
+                const requestBody = {
+                    topic: topic,
+                    max_results: parseInt(maxResults)
+                };
+                
+                const response = await fetch(`${API_BASE_URL}/seminal-papers`, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify(requestBody)
+                });
+                
+                if (!response.ok) {
+                    const errorData = await response.json();
+                    throw new Error(errorData.detail || 'Failed to find seminal papers');
+                }
+                
+                const papers = await response.json();
+                
+                if (papers.length === 0) {
+                    resultsContainer.innerHTML = '<p>No seminal papers found for this topic.</p>';
+                } else {
+                    const resultsHeader = document.createElement('h3');
+                    resultsHeader.textContent = `Found ${papers.length} Seminal Papers`;
+                    resultsContainer.appendChild(resultsHeader);
+                    
+                    papers.forEach(paper => {
+                        renderPaperCard(paper, resultsContainer);
+                    });
+                }
+            } catch (error) {
+                console.error('Error finding seminal papers:', error);
                 errorElement.textContent = `Error: ${error.message}`;
                 errorElement.style.display = 'block';
             } finally {

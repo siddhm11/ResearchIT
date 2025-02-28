@@ -26,13 +26,14 @@ logging.basicConfig(
 logger = logging.getLogger('research_recommender')
 
 # Download required NLTK resources
-try:
-    nltk.download('punkt', quiet=True)
-    nltk.download('stopwords', quiet=True)
-    nltk.download('wordnet', quiet=True)
-    logger.info("NLTK resources downloaded successfully")
-except Exception as e:
-    logger.warning(f"NLTK resource download issue: {e}")
+
+nltk_resources = ["punkt", "stopwords", "wordnet"]
+for resource in nltk_resources:
+    try:
+        nltk.data.find(f"tokenizers/{resource}")
+    except LookupError:
+        nltk.download(resource)
+
 
 
 class TextPreprocessor:
@@ -447,59 +448,23 @@ class ArxivFetcher:
         self.preprocessor = TextPreprocessor()
     
     @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=10))
-    def fetch(self, 
-              query: str = "cat:cs.LG", 
-              max_results: int = 100, 
-              date_start: Optional[str] = None, 
-              date_end: Optional[str] = None,
-              sort_by: arxiv.SortCriterion = arxiv.SortCriterion.Relevance) -> pd.DataFrame:
-        """
-        Fetch papers from arXiv with flexible querying options
-        
-        Args:
-            query: arXiv query string (can include categories, keywords, etc.)
-            max_results: maximum number of papers to fetch
-            date_start: start date in format YYYY-MM-DD
-            date_end: end date in format YYYY-MM-DD
-            sort_by: sorting criterion (Relevance, SubmittedDate, LastUpdatedDate)
-            
-        Returns:
-            DataFrame containing paper metadata
-        """
+    def fetch(self, query: str = "cat:cs.LG", max_results: int = 100, date_start: Optional[str] = None, date_end: Optional[str] = None, sort_by: arxiv.SortCriterion = arxiv.SortCriterion.Relevance) -> pd.DataFrame:
         logger.info(f"Fetching {max_results} papers for query: {query}")
-        
-        # Build date filter if provided
-        if date_start or date_end:
-            date_filter = []
-            if date_start:
-                date_filter.append(f"submittedDate:[{date_start}000000 TO 999999999999]")
-            if date_end:
-                date_filter.append(f"submittedDate:[00000000000 TO {date_end}235959]")
-            
-            # Combine with the main query
-            if "AND" in query or "OR" in query:
-                query = f"({query}) AND {' AND '.join(date_filter)}"
-            else:
-                query = f"{query} AND {' AND '.join(date_filter)}"
-                
-        logger.info(f"Final query: {query}")
-        
+
         # Initialize client with conservative rate-limiting
         client = arxiv.Client(page_size=100, delay_seconds=3)
         search = arxiv.Search(query=query, max_results=max_results, sort_by=sort_by)
-        
+
         try:
             results = list(client.results(search))
             logger.info(f"Total papers fetched: {len(results)}")
-            
+
             if len(results) == 0:
-                logger.warning("No papers retrieved! Check query or network connection.")
+                logger.warning("⚠️ No papers retrieved! Check query or network connection.")
                 return pd.DataFrame()
-                
-            # Process results into DataFrame
+
             papers = []
             for result in results:
-                # Extract paper data
                 paper = {
                     'id': result.entry_id.split('/')[-1],
                     'title': result.title,
@@ -508,24 +473,19 @@ class ArxivFetcher:
                     'primary_category': result.primary_category,
                     'categories': result.categories,
                     'published': result.published.date(),
-                    'updated': result.updated.date() if hasattr(result, 'updated') else None,
-                    'doi': result.doi if hasattr(result, 'doi') else None,
-                    'journal_ref': result.journal_ref if hasattr(result, 'journal_ref') else None,
                     'pdf_url': result.pdf_url,
                     'source': 'arxiv'
                 }
                 papers.append(paper)
-                
+
             df = pd.DataFrame(papers)
-            
-            # Process text in a separate step to avoid slowing down API fetching
-            logger.info(f"Successfully converted {len(df)} papers into DataFrame.")
+            logger.info(f"✅ Successfully converted {len(df)} papers into DataFrame.")
             return df
-            
+
         except Exception as e:
-            logger.error(f"Error fetching papers: {e}")
-            raise
-    
+            logger.error(f"❌ Error fetching papers: {e}")
+            return pd.DataFrame()
+
     def search_by_keywords(self, 
                           keywords: List[str], 
                           categories: List[str] = None,
@@ -574,16 +534,16 @@ class ArxivFetcher:
         Returns:
             DataFrame with search results
         """
-        # Search for highly cited papers (more citations = higher relevance in arXiv)
-        query = f'all:"{topic}" AND all:"survey"'
+        # Explicitly search for survey papers and reviews which often cite seminal works
+        query = f'all:"{topic}" AND (all:"survey" OR all:"review" OR all:"overview")'
         
-        # No date filters, to ensure we get older seminal papers
+        # Sort by submission date to get established papers (older papers tend to be more cited)
+        # This is a better proxy than using Relevance which may not correlate with citations
         return self.fetch(
             query=query,
             max_results=max_results,
-            sort_by=arxiv.SortCriterion.Relevance
+            sort_by=arxiv.SortCriterion.SubmittedDate
         )
-
 
 class EmbeddingSystem:
     """
@@ -591,6 +551,23 @@ class EmbeddingSystem:
     Uses FAISS for fast indexing and optimized vector representations.
     """
     
+    #claude added this code to limit the size of the raw_embeddings cache to prevent memory issues
+    
+    def limit_embedding_cache(self, max_size: int = 10000):
+        """
+        Limit the size of the raw_embeddings cache to prevent memory issues
+        
+        Args:
+            max_size: Maximum number of embeddings to keep in cache
+        """
+        if len(self.raw_embeddings) > max_size:
+            logger.info(f"Trimming embedding cache from {len(self.raw_embeddings)} to {max_size} entries")
+            # Keep only the most recent max_size entries
+            # Convert to list of (key, value) tuples, sort by keys or values if needed
+            items = list(self.raw_embeddings.items())
+            # For simplicity, we'll just keep the last max_size items
+            # In practice, you might want a more sophisticated strategy
+            self.raw_embeddings = dict(items[-max_size:])
     def __init__(self, model_name: str = 'all-MiniLM-L6-v2'):
         logger.info(f"Loading sentence transformer model: {model_name}")
         try:
@@ -601,14 +578,22 @@ class EmbeddingSystem:
             logger.error(f"Error loading model: {e}")
             raise
             
-        # Use IVF index for faster search with minimal accuracy loss
+        # Create two indices:
+        # 1. A flat index for accurate reconstruction
+        self.flat_index = faiss.IndexFlatIP(self.embedding_dim)
+        
+        # 2. IVF index for faster search with minimal accuracy loss
         self.quantizer = faiss.IndexFlatIP(self.embedding_dim)
         # Use 4x sqrt(n) clusters for better balance of speed and accuracy
         # We'll initialize with 100 clusters and retrain as needed
         self.index = faiss.IndexIVFFlat(self.quantizer, self.embedding_dim, 100, faiss.METRIC_INNER_PRODUCT)
         self.index_trained = False
         
+        # Store embeddings and their mapping to papers
         self.metadata = pd.DataFrame()
+        # Store raw embeddings for direct lookup
+        self.raw_embeddings = {}  # Map paper_id to embedding vector
+        
         self.preprocessor = TextPreprocessor()
         
     def generate_embeddings(self, texts: list) -> np.ndarray:
@@ -629,757 +614,470 @@ class EmbeddingSystem:
         return embeddings
     
     def prepare_text_for_embedding(self, title: str, abstract: str) -> str:
-        """
-        Prepare paper text for embedding by combining title and abstract
-        with special handling for better semantic representation
-        """
-        # Clean the title and abstract separately
-        clean_title = self.preprocessor.clean_text(title)
-        clean_abstract = self.preprocessor.clean_text(abstract)
-        
-        # Give more weight to the title by repeating it
+        """Ensure title and abstract are processed even if missing."""
+        clean_title = self.preprocessor.clean_text(title) if title else "Untitled Paper"
+        clean_abstract = self.preprocessor.clean_text(abstract) if abstract else "No abstract available"
         return f"{clean_title} [SEP] {clean_title} [SEP] {clean_abstract}"
+
     
     def process_papers(self, df: pd.DataFrame, preprocess: bool = True) -> None:
-        """
-        Process papers for FAISS indexing with optimized text preparation
-        
-        Args:
-            df: DataFrame containing papers
-            preprocess: Whether to apply text preprocessing
-        """
-        logger.info("Processing papers for FAISS indexing...")
         if df.empty:
-            logger.warning("No papers to process. Skipping FAISS indexing.")
+            logger.warning("⚠️ No papers to process, skipping FAISS indexing.")
             return
-            
-        # Prepare text for embedding - combining title and abstract with special handling
-        df['clean_text'] = df.apply(
-            lambda row: self.prepare_text_for_embedding(row['title'], row['abstract']), 
-            axis=1
-        )
+
+        if "title" not in df.columns or "abstract" not in df.columns:
+            logger.error("❌ Missing required columns ('title' or 'abstract') in DataFrame.")
+            return
+
+        # Ensure clean_text column exists
+        df['clean_text'] = df.apply(lambda row: self.prepare_text_for_embedding(row['title'], row.get('abstract', "")), axis=1)
+
+        if df['clean_text'].isnull().all():
+            logger.error("❌ All clean_text values are empty! Stopping FAISS processing.")
+            return
+
+        logger.info(f"✅ Processing {len(df)} papers into FAISS index.")
         
         # Generate embeddings
         embeddings = self.generate_embeddings(df['clean_text'].tolist())
-        
-        # Normalize embeddings for cosine similarity
-        logger.info("Normalizing embeddings for FAISS...")
-        faiss.normalize_L2(embeddings)
-        
-        # Train index if not trained or if we have a lot of new data
+
+        # Train IVF index if necessary
         if not self.index_trained or self.index.ntotal < 1000:
-            # Determine optimal number of clusters based on data size
             n_clusters = min(4 * int(np.sqrt(len(df) + self.index.ntotal)), 256)
-            n_clusters = max(n_clusters, 100)  # At least 100 clusters
-            
+            n_clusters = max(n_clusters, 100)
+
             logger.info(f"Training IVF index with {n_clusters} clusters...")
-            
-            # Create new index with adjusted clusters
+
             self.index = faiss.IndexIVFFlat(self.quantizer, self.embedding_dim, n_clusters, faiss.METRIC_INNER_PRODUCT)
-            
-            # Training requires at least n_clusters vectors
+
             if len(embeddings) < n_clusters:
-                logger.warning(f"Not enough vectors to train {n_clusters} clusters. Using existing index.")
+                logger.warning(f"Not enough vectors to train {n_clusters} clusters. Using simple FAISS index.")
+                self.index = faiss.IndexFlatIP(self.embedding_dim)  # Fallback to Flat index
+                self.index_trained = True
             else:
                 self.index.train(embeddings)
                 self.index_trained = True
-        
-        # Add to index
-        self.index.add(embeddings)
-        logger.info(f"FAISS index now contains {self.index.ntotal} embeddings.")
-        
-        # Store metadata
-        if self.metadata.empty:
-            self.metadata = df.copy()
+
+        # Add embeddings to FAISS index
+        if self.index_trained:
+            self.index.add(embeddings)
+            logger.info(f"📌 FAISS index now contains {self.index.ntotal} embeddings.")
         else:
-            # Concatenate new metadata with existing
-            # First, save the current embedding indices
-            if 'embedding_idx' in self.metadata.columns:
-                old_embeddings_count = self.index.ntotal - len(df)
-                # Update existing indices if needed
-                self.metadata['embedding_idx'] = list(range(old_embeddings_count))
-                
-                # Create indices for new data
-                new_df = df.copy()
-                new_df['embedding_idx'] = list(range(old_embeddings_count, self.index.ntotal))
-                
-                # Combine
-                self.metadata = pd.concat([self.metadata, new_df], ignore_index=True)
-            else:
-                # First time adding embedding indices
-                self.metadata['embedding_idx'] = list(range(self.index.ntotal))
-        
-        # Store normalized clean text for better recommendations
+            logger.warning("Index not trained. Cannot add vectors.")
+            return
+
+        # Store metadata
+        paper_df = df.copy()
+        current_size = len(self.metadata)
+        paper_df['embedding_idx'] = list(range(current_size, current_size + len(df)))
+
+        if self.metadata.empty:
+            self.metadata = paper_df
+        else:
+            self.metadata = pd.concat([self.metadata, paper_df], ignore_index=True)
+
+        # Preprocess text if required
         if preprocess:
             logger.info("Adding preprocessed text for improved recommendations...")
-            # Use parallel processing for preprocessing when dealing with many papers
+            processed_text_map = {}
+
             if len(df) > 50:
-                processed_texts = self.preprocessor.batch_process(
-                    df['clean_text'].tolist(),
-                    lemmatize=True
-                )
+                processed_texts = self.preprocessor.batch_process(df['clean_text'].tolist(), lemmatize=True)
                 for i, (_, row) in enumerate(df.iterrows()):
-                    idx = self.metadata[self.metadata['id'] == row['id']].index
-                    if len(idx) > 0:
-                        self.metadata.at[idx[0], 'processed_text'] = processed_texts[i]
+                    processed_text_map[row['id']] = processed_texts[i]
             else:
                 for _, row in df.iterrows():
                     processed_text = self.preprocessor.process_text(row['clean_text'], lemmatize=True)
-                    idx = self.metadata[self.metadata['id'] == row['id']].index
-                    if len(idx) > 0:
-                        self.metadata.at[idx[0], 'processed_text'] = processed_text
-                
-        logger.info("Metadata stored with embeddings.")
+                    processed_text_map[row['id']] = processed_text
+
+            # Apply processed text mapping
+            self.metadata.loc[self.metadata['id'].isin(processed_text_map.keys()), 'processed_text'] = \
+                self.metadata.loc[self.metadata['id'].isin(processed_text_map.keys()), 'id'].map(processed_text_map)
+
+        logger.info("✅ Metadata stored with embeddings.")
+
+    def get_paper_embedding(self, paper_id: str) -> Optional[np.ndarray]:
+        """
+        Get embedding vector for a specific paper ID
         
-    # Complete the recommend method in EmbeddingSystem class
-def recommend(self, 
-             text: str = None, 
-             paper_id: str = None,
-             user_preferences: np.ndarray = None,
-             k: int = 5, 
-             filter_criteria: Dict = None,
-             nprobe: int = 10,
-             quality_assessor: Optional['PaperQualityAssessor'] = None) -> pd.DataFrame:
-    """
-    Get recommendations based on text, paper_id, or user preferences
-    
-    Args:
-        text: Input text to find similar papers
-        paper_id: ID of paper to find similar papers to
-        user_preferences: User preference embedding vector
-        k: Number of recommendations to return
-        filter_criteria: Dictionary with metadata filters
-        nprobe: Number of clusters to probe (higher = more accurate but slower)
-        quality_assessor: Optional quality assessor for scoring papers
+        Args:
+            paper_id: ID of the paper
+            
+        Returns:
+            Numpy array containing the embedding vector or None if not found
+        """
+        # First try direct lookup from stored raw embeddings (fastest)
+        if paper_id in self.raw_embeddings:
+            return self.raw_embeddings[paper_id].reshape(1, -1)
         
-    Returns:
-        DataFrame with recommendations
-    """
-    if not self.index_trained or self.index.ntotal == 0:
-        logger.warning("Index not trained or empty. Cannot provide recommendations.")
-        return pd.DataFrame()
+        # Fallback to metadata lookup and flat index reconstruction
+        paper_data = self.metadata[self.metadata['id'] == paper_id]
+        if paper_data.empty:
+            logger.warning(f"Paper ID {paper_id} not found in index.")
+            return None
         
-    # Set nprobe for search - balance between speed and accuracy
-    self.index.nprobe = nprobe
-    
-    # Get query vector
-    query_vector = None
-    
-    if text is not None:
-        # Clean and process the query text
-        clean_text = self.preprocessor.clean_text(text)
-        query_vector = self.model.encode([clean_text])[0].reshape(1, -1).astype('float32')
+        # Get embedding index for this paper
+        if 'embedding_idx' not in paper_data.columns:
+            logger.warning(f"No embedding index for paper ID {paper_id}")
+            return None
+            
+        embedding_idx = int(paper_data['embedding_idx'].iloc[0])
         
-    elif paper_id is not None:
-        # Find paper in metadata and use its embedding
-        paper_idx = self.metadata[self.metadata['id'] == paper_id].index
-        if len(paper_idx) == 0:
-            logger.warning(f"Paper ID {paper_id} not found in metadata.")
+        # Reconstruct embedding from flat index (reliable)
+        try:
+            vector = np.zeros((1, self.embedding_dim), dtype='float32')
+            vector[0] = self.flat_index.reconstruct(embedding_idx)
+            return vector
+        except Exception as e:
+            logger.error(f"Error reconstructing embedding for paper ID {paper_id}: {e}")
+            return None
+
+    def recommend(self, 
+                 text: str = None, 
+                 paper_id: str = None,
+                 user_preferences: np.ndarray = None,
+                 k: int = 5, 
+                 filter_criteria: Dict = None,
+                 nprobe: int = 10,
+                 quality_assessor: Optional['PaperQualityAssessor'] = None) -> pd.DataFrame:
+        """
+        Get recommendations based on text, paper_id, or user preferences
+        
+        Args:
+            text: Input text to find similar papers
+            paper_id: ID of paper to find similar papers to
+            user_preferences: Pre-computed user preference vector
+            k: Number of recommendations to return
+            filter_criteria: Dictionary of metadata filters to apply
+            nprobe: Number of clusters to probe in IVF index (higher = more accurate but slower)
+            quality_assessor: PaperQualityAssessor instance for quality scoring
+            
+        Returns:
+            DataFrame with recommended papers and similarity scores
+        """
+        if not self.index_trained or self.index.ntotal == 0:
+            logger.warning("Index not trained or empty. Cannot recommend papers.")
             return pd.DataFrame()
             
-        embedding_idx = self.metadata.loc[paper_idx[0], 'embedding_idx']
+        # Set search parameters for better recall
+        if hasattr(self.index, 'nprobe'):  # Only set nprobe for IVF indices
+            self.index.nprobe = nprobe
         
-        # Get the embedding from the FAISS index
-        query_vector = np.zeros((1, self.embedding_dim), dtype='float32')
-        self.index.reconstruct(int(embedding_idx), query_vector[0])
+        query_vector = None
         
-    elif user_preferences is not None:
-        # Use user preferences directly
-        query_vector = user_preferences.reshape(1, -1).astype('float32')
-        
-    else:
-        logger.error("No query provided. Must provide text, paper_id, or user_preferences.")
-        return pd.DataFrame()
-    
-    # Normalize query vector for cosine similarity
-    faiss.normalize_L2(query_vector)
-    
-    # Search for similar papers
-    distances, indices = self.index.search(query_vector, k * 2)  # Get 2x results for filtering
-    
-    # Convert to dataframe for easier filtering
-    results = pd.DataFrame({
-        'embedding_idx': indices[0],
-        'similarity_score': distances[0]
-    })
-    
-    # Join with metadata
-    results = results.merge(
-        self.metadata, 
-        left_on='embedding_idx', 
-        right_on='embedding_idx', 
-        how='inner'
-    )
-    
-    # Apply filters if provided
-    if filter_criteria:
-        for field, value in filter_criteria.items():
-            if field in results.columns:
-                if isinstance(value, list):
-                    results = results[results[field].isin(value)]
-                elif isinstance(value, dict) and ('min' in value or 'max' in value):
-                    if 'min' in value:
-                        results = results[results[field] >= value['min']]
-                    if 'max' in value:
-                        results = results[results[field] <= value['max']]
-                else:
-                    results = results[results[field] == value]
-    
-    # Apply quality assessment if provided
-    if quality_assessor:
-        logger.info("Applying quality assessment to recommendations...")
-        quality_scores = []
-        
-        for _, row in results.iterrows():
-            quality_score = quality_assessor.assess_paper_quality(row.to_dict())
-            quality_scores.append(quality_score)
+        # Case 1: Text query
+        if text is not None:
+            logger.info(f"Generating embedding for query text: {text[:50]}...")
+            clean_text = self.preprocessor.clean_text(text)
+            query_vector = self.model.encode([clean_text])[0].astype('float32').reshape(1, -1)
+            faiss.normalize_L2(query_vector)
             
-        results['quality_score'] = quality_scores
-        
-        # Combined score: weighted combination of similarity and quality
-        # Adjust the weights to prioritize similarity or quality
-        similarity_weight = 0.7
-        quality_weight = 0.3
-        
-        results['combined_score'] = (
-            similarity_weight * results['similarity_score'] + 
-            quality_weight * results['quality_score']
-        )
-        
-        # Sort by combined score
-        results = results.sort_values('combined_score', ascending=False)
-    else:
-        # Sort by similarity score only
-        results = results.sort_values('similarity_score', ascending=False)
-    
-    # Return top k after all filtering
-    return results.head(k)
-
-
-# Add new class for user preference tracking
-class UserPreferenceTracker:
-    """
-    Tracks and updates user preferences based on interactions with papers.
-    Uses an evolving embedding to represent user interests.
-    """
-    
-    def __init__(self, embedding_dim: int = 384):
-        self.embedding_dim = embedding_dim
-        self.users = {}  # Dictionary to store user preferences
-        
-    def initialize_user(self, user_id: str) -> None:
-        """Initialize a new user with default preferences"""
-        if user_id not in self.users:
-            self.users[user_id] = {
-                'preference_vector': np.zeros(self.embedding_dim, dtype='float32'),
-                'interaction_count': 0,
-                'liked_papers': set(),
-                'disliked_papers': set(),
-                'viewed_papers': set(),
-                'categories_of_interest': {}
-            }
-            logger.info(f"Initialized new user: {user_id}")
-    
-    def update_preferences(self, 
-                          user_id: str, 
-                          paper_embedding: np.ndarray,
-                          interaction_type: str = 'view',
-                          paper_id: str = None,
-                          paper_categories: List[str] = None) -> None:
-        """
-        Update user preferences based on interaction with a paper
-        
-        Args:
-            user_id: User identifier
-            paper_embedding: Embedding vector of the paper
-            interaction_type: Type of interaction ('view', 'like', 'dislike', 'save')
-            paper_id: ID of the paper
-            paper_categories: Categories of the paper
-        """
-        if user_id not in self.users:
-            self.initialize_user(user_id)
+        # Case 2: Paper ID query - using the fixed method
+        elif paper_id is not None:
+            logger.info(f"Finding papers similar to paper_id: {paper_id}")
+            query_vector = self.get_paper_embedding(paper_id)
             
-        user = self.users[user_id]
-        
-        # Define weights for different types of interactions
-        weights = {
-            'view': 0.1,
-            'like': 0.5,
-            'dislike': -0.3,
-            'save': 0.7,
-            'cite': 0.8
-        }
-        
-        # Update interaction count
-        user['interaction_count'] += 1
-        
-        # Track paper interaction
-        if paper_id:
-            if interaction_type == 'like':
-                user['liked_papers'].add(paper_id)
-                # Remove from disliked if previously disliked
-                user['disliked_papers'].discard(paper_id)
-            elif interaction_type == 'dislike':
-                user['disliked_papers'].add(paper_id)
-                # Remove from liked if previously liked
-                user['liked_papers'].discard(paper_id)
-            elif interaction_type in ['view', 'save', 'cite']:
-                user['viewed_papers'].add(paper_id)
-        
-        # Track category interests
-        if paper_categories:
-            for category in paper_categories:
-                user['categories_of_interest'][category] = user['categories_of_interest'].get(category, 0) + weights.get(interaction_type, 0.1)
-        
-        # Early return if no embedding to update
-        if paper_embedding is None:
-            return
+            if query_vector is None:
+                logger.warning(f"Could not retrieve embedding for paper ID {paper_id}")
+                return pd.DataFrame()
             
-        # Ensure the embedding is normalized
-        paper_embedding_norm = paper_embedding.copy()
-        faiss.normalize_L2(paper_embedding_norm.reshape(1, -1))
-        paper_embedding_norm = paper_embedding_norm.flatten()
+        # Case 3: User preferences vector
+        elif user_preferences is not None:
+            logger.info("Using provided user preference vector for recommendations")
+            query_vector = user_preferences.reshape(1, -1).astype('float32')
+            faiss.normalize_L2(query_vector)
         
-        # Calculate adaptive learning rate - decay over time but maintain responsiveness
-        learn_rate = 1.0 / (1.0 + 0.1 * user['interaction_count'])
+        else:
+            logger.error("No query provided. Please provide text, paper_id, or user_preferences.")
+            return pd.DataFrame()
         
-        # Apply interaction weight
-        weight = weights.get(interaction_type, 0.1)
-        update = weight * learn_rate * paper_embedding_norm
+        # Perform similarity search
+        # Get 2*k results initially to allow for filtering
+        num_results = min(2 * k, self.index.ntotal)
+        scores, indices = self.index.search(query_vector, num_results)
         
-        # Update preference vector
-        user['preference_vector'] += update
+        # Convert to DataFrame for easier processing
+        results_df = pd.DataFrame({
+            'embedding_idx': indices[0],
+            'similarity_score': scores[0]
+        })
         
-        # Normalize preference vector
-        pref_norm = np.linalg.norm(user['preference_vector'])
-        if pref_norm > 0:
-            user['preference_vector'] /= pref_norm
+        # Join with metadata - using embedding_idx for both indices
+        results_with_metadata = []
+        for idx, row in results_df.iterrows():
+            embedding_idx = int(row['embedding_idx'])
+            metadata_matches = self.metadata[self.metadata['embedding_idx'] == embedding_idx]
             
-        logger.info(f"Updated preferences for user {user_id} based on {interaction_type} interaction")
-    
-    def get_user_preferences(self, user_id: str) -> Dict:
-        """Get user preference information"""
-        if user_id not in self.users:
-            logger.warning(f"User {user_id} not found. Initializing with default preferences.")
-            self.initialize_user(user_id)
+            if not metadata_matches.empty:
+                paper_data = metadata_matches.iloc[0].to_dict()
+                paper_data['similarity_score'] = row['similarity_score']
+                results_with_metadata.append(paper_data)
+        
+        if not results_with_metadata:
+            logger.warning("No metadata matches found for search results.")
+            return pd.DataFrame()
             
-        return self.users[user_id]
-    
-    def get_preference_vector(self, user_id: str) -> np.ndarray:
-        """Get user preference embedding vector for recommendations"""
-        if user_id not in self.users:
-            logger.warning(f"User {user_id} not found. Initializing with default preferences.")
-            self.initialize_user(user_id)
+        results_df = pd.DataFrame(results_with_metadata)
+        
+        # If searching by paper_id, remove the query paper from results
+        if paper_id is not None:
+            results_df = results_df[results_df['id'] != paper_id]
+        
+        # Apply filters if provided
+        if filter_criteria:
+            for column, value in filter_criteria.items():
+                if column in results_df.columns:
+                    if isinstance(value, list):
+                        results_df = results_df[results_df[column].isin(value)]
+                    elif isinstance(value, dict) and 'min' in value and 'max' in value:
+                        results_df = results_df[
+                            (results_df[column] >= value['min']) & 
+                            (results_df[column] <= value['max'])
+                        ]
+                    elif isinstance(value, dict) and 'after' in value:
+                        results_df = results_df[results_df[column] >= value['after']]
+                    elif isinstance(value, dict) and 'before' in value:
+                        results_df = results_df[results_df[column] <= value['before']]
+                    else:
+                        results_df = results_df[results_df[column] == value]
+        
+        # Apply quality assessment if provided
+        if quality_assessor and not results_df.empty:
+            logger.info("Applying quality assessment to recommendations...")
+            quality_scores = []
+            for _, paper in results_df.iterrows():
+                quality_score = quality_assessor.assess_paper_quality(paper)
+                quality_scores.append(quality_score)
             
-        return self.users[user_id]['preference_vector']
+            results_df['quality_score'] = quality_scores
+            
+            # Use parameterized weights
+            results_df['combined_score'] = (
+                similarity_weight * results_df['similarity_score'] + 
+                quality_weight * results_df['quality_score']
+            )
+            
+            # Sort by combined score
+            results_df = results_df.sort_values('combined_score', ascending=False)
+        
+        else:
+            # Sort by similarity score only
+            results_df = results_df.sort_values('similarity_score', ascending=False)
+        # Return top k results (or fewer if not enough results)
+        return results_df.head(k)
     
-    def save_preferences(self, filepath: str) -> None:
-        """Save user preferences to file"""
-        data_to_save = {}
-        
-        # Convert numpy arrays to lists for JSON serialization
-        for user_id, user_data in self.users.items():
-            data_to_save[user_id] = {
-                'preference_vector': user_data['preference_vector'].tolist(),
-                'interaction_count': user_data['interaction_count'],
-                'liked_papers': list(user_data['liked_papers']),
-                'disliked_papers': list(user_data['disliked_papers']),
-                'viewed_papers': list(user_data['viewed_papers']),
-                'categories_of_interest': user_data['categories_of_interest']
-            }
-        
-        with open(filepath, 'w') as f:
-            json.dump(data_to_save, f)
-        
-        logger.info(f"Saved user preferences to {filepath}")
-    
-    def load_preferences(self, filepath: str) -> None:
-        """Load user preferences from file"""
-        try:
-            with open(filepath, 'r') as f:
-                data = json.load(f)
-                
-            for user_id, user_data in data.items():
-                self.users[user_id] = {
-                    'preference_vector': np.array(user_data['preference_vector'], dtype='float32'),
-                    'interaction_count': user_data['interaction_count'],
-                    'liked_papers': set(user_data['liked_papers']),
-                    'disliked_papers': set(user_data['disliked_papers']),
-                    'viewed_papers': set(user_data['viewed_papers']),
-                    'categories_of_interest': user_data['categories_of_interest']
-                }
-                
-            logger.info(f"Loaded preferences for {len(self.users)} users")
-        except Exception as e:
-            logger.error(f"Error loading user preferences: {e}")
-
-
-# Create a more efficient RecommenderSystem class that ties everything together
+     
 class ResearchRecommender:
     """
-    Complete research paper recommendation system with quality assessment and user preferences.
+    Main class for the research paper recommendation system.
+    Integrates fetching, preprocessing, embedding, citation analysis, and quality assessment.
     """
     
-    def __init__(self, 
-                use_faster_model: bool = True,
-                load_existing: bool = False,
-                model_path: str = "./models",
-                user_prefs_path: str = "./user_preferences.json"):
-        """
-        Initialize the recommendation system
-        
-        Args:
-            use_faster_model: Whether to use a faster, more efficient model
-            load_existing: Whether to load existing index and user preferences
-            model_path: Path to save/load models
-            user_prefs_path: Path to save/load user preferences
-        """
-        self.model_path = model_path
-        self.user_prefs_path = user_prefs_path
-        
-        # Select model: faster vs more accurate
-        if use_faster_model:
-            # MiniLM is ~2x faster than MPNet with minimal quality loss
-            model_name = 'all-MiniLM-L6-v2'
-        else:
-            # MPNet has better quality but is slower
-            model_name = 'all-mpnet-base-v2'
-            
-        logger.info(f"Initializing with model: {model_name}")
-        
-        # Initialize components
-        self.embedding_system = EmbeddingSystem(model_name=model_name)
+    def __init__(self, embedding_model: str = 'all-MiniLM-L6-v2'):
+        self.fetcher = ArxivFetcher()
+        self.embedding_system = EmbeddingSystem(model_name=embedding_model)
+        self.preprocessor = TextPreprocessor()
         self.citation_fetcher = CitationFetcher()
-        self.quality_assessor = PaperQualityAssessor(self.citation_fetcher)
-        self.arxiv_fetcher = ArxivFetcher()
-        self.user_tracker = UserPreferenceTracker(
-            embedding_dim=self.embedding_system.embedding_dim
-        )
+        self.quality_assessor = PaperQualityAssessor(citation_fetcher=self.citation_fetcher)
         
-        # Load existing data if requested
-        if load_existing:
-            self._load_state()
+    def fetch_and_index(self, query: str = "cat:cs.LG", max_results: int = 100, date_start: Optional[str] = None, date_end: Optional[str] = None, sort_by: arxiv.SortCriterion = arxiv.SortCriterion.Relevance) -> pd.DataFrame:
+        papers = self.fetcher.fetch(query=query, max_results=max_results, date_start=date_start, date_end=date_end, sort_by=sort_by)
+
+        if papers.empty:
+            logger.warning("⚠️ No papers retrieved, skipping indexing.")
+            return pd.DataFrame()  # Return early to avoid errors
+
+        logger.info(f"📌 Processing {len(papers)} papers for embedding...")
+        self.embedding_system.process_papers(papers)
+
+        return papers
+
     
-    def _load_state(self) -> None:
-        """Load existing index and user preferences"""
-        try:
-            # Load FAISS index if exists
-            index_path = f"{self.model_path}/paper_index.faiss"
-            metadata_path = f"{self.model_path}/paper_metadata.pkl"
-            
-            if os.path.exists(index_path) and os.path.exists(metadata_path):
-                self.embedding_system.index = faiss.read_index(index_path)
-                self.embedding_system.metadata = pd.read_pickle(metadata_path)
-                self.embedding_system.index_trained = True
-                logger.info(f"Loaded existing index with {self.embedding_system.index.ntotal} papers")
-            
-            # Load user preferences if exists
-            if os.path.exists(self.user_prefs_path):
-                self.user_tracker.load_preferences(self.user_prefs_path)
-        except Exception as e:
-            logger.error(f"Error loading existing state: {e}")
-    
-    def save_state(self) -> None:
-        """Save current index and user preferences"""
-        try:
-            # Ensure directory exists
-            os.makedirs(self.model_path, exist_ok=True)
-            
-            # Save FAISS index
-            index_path = f"{self.model_path}/paper_index.faiss"
-            metadata_path = f"{self.model_path}/paper_metadata.pkl"
-            
-            faiss.write_index(self.embedding_system.index, index_path)
-            self.embedding_system.metadata.to_pickle(metadata_path)
-            
-            # Save user preferences
-            self.user_tracker.save_preferences(self.user_prefs_path)
-            
-            logger.info("System state saved successfully")
-        except Exception as e:
-            logger.error(f"Error saving state: {e}")
-    
-    def fetch_papers(self, 
-                    query: str = None,
-                    keywords: List[str] = None,
-                    categories: List[str] = None,
-                    max_results: int = 100,
-                    date_start: str = None,
-                    date_end: str = None) -> pd.DataFrame:
+    def fetch_by_keywords(self,
+                         keywords: List[str],
+                         categories: List[str] = None,
+                         max_results: int = 100,
+                         date_start: Optional[str] = None, 
+                         date_end: Optional[str] = None) -> pd.DataFrame:
         """
-        Fetch papers based on query or keywords
+        Fetch papers by keywords and categories
         
         Args:
-            query: Direct arXiv query
             keywords: List of keywords to search for
             categories: List of arXiv categories
-            max_results: Maximum number of papers to fetch
-            date_start: Start date for papers
-            date_end: End date for papers
+            max_results: Maximum papers to fetch
+            date_start: Start date (YYYY-MM-DD)
+            date_end: End date (YYYY-MM-DD)
             
         Returns:
             DataFrame with papers
         """
-        if query:
-            papers = self.arxiv_fetcher.fetch(
-                query=query,
-                max_results=max_results,
-                date_start=date_start,
-                date_end=date_end
-            )
-        elif keywords:
-            papers = self.arxiv_fetcher.search_by_keywords(
-                keywords=keywords,
-                categories=categories,
-                max_results=max_results,
-                date_start=date_start,
-                date_end=date_end
-            )
-        else:
-            logger.error("Must provide either query or keywords")
-            return pd.DataFrame()
+        papers = self.fetcher.search_by_keywords(
+            keywords=keywords,
+            categories=categories,
+            max_results=max_results,
+            date_start=date_start,
+            date_end=date_end
+        )
+        
+        if not papers.empty:
+            self.embedding_system.process_papers(papers)
             
-        # Process papers
+        return papers
+        
+    def find_seminal_papers(self, topic: str, max_results: int = 10) -> pd.DataFrame:
+        """Find potentially seminal/highly-cited papers on a topic"""
+        papers = self.fetcher.search_seminal_papers(topic, max_results)
+        
         if not papers.empty:
             self.embedding_system.process_papers(papers)
             
         return papers
     
-    def assess_paper_quality(self, paper_id: str, paper_data: dict = None) -> float:
+    def recommend(self, 
+                 text: str = None, 
+                 paper_id: str = None,
+                 user_preferences: np.ndarray = None,
+                 k: int = 5,
+                 min_date: str = None,
+                 max_date: str = None,
+                 quality_aware: bool = True,
+                 nprobe: int = 10) -> pd.DataFrame:
         """
-        Assess the quality of a paper
-        
-        Args:
-            paper_id: ID of the paper
-            paper_data: Paper data if available, otherwise fetched from metadata
-            
-        Returns:
-            Quality score between 0 and 1
-        """
-        if paper_data is None:
-            # Try to get from metadata
-            paper_idx = self.embedding_system.metadata[self.embedding_system.metadata['id'] == paper_id].index
-            if len(paper_idx) == 0:
-                logger.warning(f"Paper ID {paper_id} not found in metadata.")
-                return 0.5
-            
-            paper_data = self.embedding_system.metadata.loc[paper_idx[0]].to_dict()
-            
-        return self.quality_assessor.assess_paper_quality(paper_data)
-    
-    def get_recommendations(self,
-                           text: str = None,
-                           paper_id: str = None,
-                           user_id: str = None,
-                           k: int = 5,
-                           filter_criteria: Dict = None,
-                           include_quality: bool = True) -> pd.DataFrame:
-        """
-        Get personalized paper recommendations
+        Get paper recommendations
         
         Args:
             text: Query text
-            paper_id: Paper ID to find similar papers
-            user_id: User ID for personalized recommendations
+            paper_id: Query paper ID
+            user_preferences: User preference vector
             k: Number of recommendations
-            filter_criteria: Filtering criteria
-            include_quality: Whether to include quality assessment
+            min_date: Minimum date (YYYY-MM-DD)
+            max_date: Maximum date (YYYY-MM-DD)
+            quality_aware: Whether to use quality assessment in ranking
+            nprobe: Number of clusters to probe in IVF index
             
         Returns:
             DataFrame with recommendations
         """
-        user_preferences = None
-        
-        # If user_id is provided, get personalized recommendations
-        if user_id:
-            user_preferences = self.user_tracker.get_preference_vector(user_id)
+        # Prepare filter criteria if dates specified
+        filter_criteria = None
+        if min_date or max_date:
+            filter_criteria = {
+                'published': {
+                    'min': min_date,
+                    'max': max_date
+                }
+            }
             
-            # If user has no preferences yet, fall back to text/paper_id
-            if np.all(user_preferences == 0):
-                user_preferences = None
-                logger.info(f"User {user_id} has no preferences yet, falling back to content-based")
-        
         # Get recommendations
-        recommendations = self.embedding_system.recommend(
+        return self.embedding_system.recommend(
             text=text,
             paper_id=paper_id,
             user_preferences=user_preferences,
             k=k,
             filter_criteria=filter_criteria,
-            quality_assessor=self.quality_assessor if include_quality else None
+            nprobe=nprobe,
+            quality_assessor=self.quality_assessor if quality_aware else None
         )
-        
-        return recommendations
     
-    def record_user_interaction(self,
-                               user_id: str,
-                               paper_id: str,
-                               interaction_type: str = 'view') -> None:
+    def assess_paper_quality(self, paper_id: str) -> float:
         """
-        Record user interaction with a paper and update preferences
+        Assess the quality of a specific paper
         
         Args:
-            user_id: User ID
-            paper_id: Paper ID
-            interaction_type: Type of interaction ('view', 'like', 'dislike', 'save', 'cite')
-        """
-        # Get paper data and embedding
-        paper_idx = self.embedding_system.metadata[self.embedding_system.metadata['id'] == paper_id].index
-        if len(paper_idx) == 0:
-            logger.warning(f"Paper ID {paper_id} not found in metadata.")
-            return
-            
-        paper_data = self.embedding_system.metadata.loc[paper_idx[0]]
-        embedding_idx = paper_data['embedding_idx']
-        
-        # Get embedding from FAISS index
-        paper_embedding = np.zeros((1, self.embedding_system.embedding_dim), dtype='float32')
-        self.embedding_system.index.reconstruct(int(embedding_idx), paper_embedding[0])
-        
-        # Update user preferences
-        self.user_tracker.update_preferences(
-            user_id=user_id,
-            paper_embedding=paper_embedding[0],
-            interaction_type=interaction_type,
-            paper_id=paper_id,
-            paper_categories=paper_data.get('categories', [])
-        )
-        
-        logger.info(f"Recorded {interaction_type} interaction for user {user_id} on paper {paper_id}")
-    
-    def get_top_cited_papers(self, query: str, k: int = 5) -> pd.DataFrame:
-        """
-        Get top cited papers for a query
-        
-        Args:
-            query: Search query
-            k: Number of papers to return
+            paper_id: ID of the paper to assess
             
         Returns:
-            DataFrame with top cited papers
+            Quality score between 0 and 1
         """
-        # Fetch papers
-        papers = self.arxiv_fetcher.fetch(
-            query=query,
-            max_results=k * 3,  # Fetch more for filtering
-            sort_by=arxiv.SortCriterion.Relevance
-        )
-        
-        if papers.empty:
-            return pd.DataFrame()
-        
-        # Get citation counts
-        citation_counts = []
-        for _, paper in papers.iterrows():
-            citation_data = self.citation_fetcher.get_citation_count(
-                paper_id=paper['id'],
-                title=paper['title']
-            )
-            citation_counts.append(citation_data['citation_count'])
-        
-        # Add citation counts to papers
-        papers['citation_count'] = citation_counts
-        
-        # Sort by citation count and return top k
-        return papers.sort_values('citation_count', ascending=False).head(k)
+        paper_data = self.embedding_system.metadata[self.embedding_system.metadata['id'] == paper_id]
+        if paper_data.empty:
+            logger.warning(f"Paper ID {paper_id} not found in index.")
+            return 0.0
+            
+        return self.quality_assessor.assess_paper_quality(paper_data.iloc[0])
     
-    def get_user_insights(self, user_id: str) -> Dict:
+    def get_citation_info(self, paper_id: str) -> dict:
         """
-        Get insights about user preferences
+        Get citation information for a paper
         
         Args:
-            user_id: User ID
+            paper_id: ID of the paper
             
         Returns:
-            Dictionary with user insights
+            Dictionary with citation metrics
         """
-        if user_id not in self.user_tracker.users:
-            logger.warning(f"User {user_id} not found.")
+        paper_data = self.embedding_system.metadata[self.embedding_system.metadata['id'] == paper_id]
+        if paper_data.empty:
+            logger.warning(f"Paper ID {paper_id} not found in index.")
             return {}
-        
-        user_data = self.user_tracker.get_user_preferences(user_id)
-        
-        # Get top categories
-        categories = sorted(
-            user_data['categories_of_interest'].items(),
-            key=lambda x: x[1],
-            reverse=True
+            
+        return self.citation_fetcher.get_citation_count(
+            paper_id=paper_id,
+            title=paper_data['title'].iloc[0]
         )
-        
-        # Get similar papers to user preferences
-        similar_papers = []
-        if not np.all(user_data['preference_vector'] == 0):
-            recommendations = self.embedding_system.recommend(
-                user_preferences=user_data['preference_vector'].reshape(1, -1),
-                k=5
-            )
-            if not recommendations.empty:
-                similar_papers = recommendations[['id', 'title', 'similarity_score']].to_dict(orient='records')
-        
-        return {
-            'interaction_count': user_data['interaction_count'],
-            'liked_papers_count': len(user_data['liked_papers']),
-            'disliked_papers_count': len(user_data['disliked_papers']),
-            'viewed_papers_count': len(user_data['viewed_papers']),
-            'top_categories': categories[:5],
-            'similar_papers': similar_papers
-        }
-
+    
+    def save_index(self, filepath: str) -> None:
+        """Save the FAISS index to disk"""
+        if self.embedding_system.index.ntotal > 0:
+            logger.info(f"Saving index with {self.embedding_system.index.ntotal} vectors to {filepath}")
+            faiss.write_index(self.embedding_system.index, filepath)
+            self.embedding_system.metadata.to_pickle(f"{filepath}_metadata.pkl")
+            
+            # Save citation cache
+            with open(f"{filepath}_citation_cache.json", 'w') as f:
+                json.dump(self.citation_fetcher.citation_cache, f)
+                
+            logger.info("Index, metadata and citation cache saved successfully")
+        else:
+            logger.warning("Cannot save empty index")
+    
+    def load_index(self, filepath: str) -> None:
+        """Load a FAISS index from disk"""
+        try:
+            logger.info(f"Loading index from {filepath}")
+            self.embedding_system.index = faiss.read_index(filepath)
+            self.embedding_system.metadata = pd.read_pickle(f"{filepath}_metadata.pkl")
+            
+            # Load citation cache if exists
+            try:
+                with open(f"{filepath}_citation_cache.json", 'r') as f:
+                    self.citation_fetcher.citation_cache = json.load(f)
+            except FileNotFoundError:
+                logger.warning("Citation cache not found, starting with empty cache")
+                
+            # Set index as trained
+            if self.embedding_system.index.ntotal > 0:
+                self.embedding_system.index_trained = True
+                
+            logger.info(f"Successfully loaded index with {self.embedding_system.index.ntotal} vectors")
+        except Exception as e:
+            logger.error(f"Error loading index: {e}")
+            raise
 
 # Example usage
-def main():
-    # Initialize recommender
-    recommender = ResearchRecommender(
-        use_faster_model=True,  # Use faster model for better performance
-        load_existing=True      # Load existing data if available
-    )
-    
-    # Fetch papers on a topic
-    papers = recommender.fetch_papers(
-        keywords=["large language models", "transformer"],
-        categories=["cs.CL", "cs.LG"],
-        max_results=50,
-        date_start="2023-01-01"
-    )
-    
-    # Create a user and record interactions
-    user_id = "user123"
-    
-    # Simulate some user interactions
-    for _, paper in papers.head(5).iterrows():
-        recommender.record_user_interaction(
-            user_id=user_id,
-            paper_id=paper['id'],
-            interaction_type='view'
-        )
-    
-    # Record a like for the first paper
-    if not papers.empty:
-        recommender.record_user_interaction(
-            user_id=user_id,
-            paper_id=papers.iloc[0]['id'],
-            interaction_type='like'
-        )
-    
-    # Get personalized recommendations
-    recommendations = recommender.get_recommendations(
-        user_id=user_id,
-        k=5,
-        include_quality=True
-    )
-    
-    # Print recommendations
-    print("\nPersonalized Recommendations:")
-    for _, rec in recommendations.iterrows():
-        print(f"Title: {rec['title']}")
-        print(f"Combined Score: {rec['combined_score']:.4f}")
-        print(f"Quality Score: {rec['quality_score']:.4f}")
-        print(f"Similarity: {rec['similarity_score']:.4f}")
-        print("---")
-    
-    # Save state for future use
-    recommender.save_state()
-
-
 if __name__ == "__main__":
-    main()
+    # Initialize the recommender
+    recommender = ResearchRecommender()
+    
+    # Get recent papers on transformers
+    papers = recommender.fetch_and_index(
+        query="all:transformer AND all:attention", 
+        max_results=50,
+        date_start="2023-01-01",
+        sort_by=arxiv.SortCriterion.SubmittedDate
+    )
+    
+    # Also get the original "Attention is All You Need" paper
+    seminal_papers = recommender.find_seminal_papers("attention transformer", max_results=5)
+    
+    # Get recommendations based on a query
+    recommendations = recommender.recommend(
+        text="Efficient transformer models for natural language processing", 
+        k=5
+    )
+    
+    # Print results
+    print(f"\nTop recommendations:")
+    for i, row in recommendations.iterrows():
+        print(f"{i+1}. {row['title']} (Similarity: {row['similarity_score']:.2f})")
