@@ -838,8 +838,10 @@ class EmbeddingSystem:
             
         results_df = pd.DataFrame(results_with_metadata)
         
-        results_df = pd.concat([pd.DataFrame(matched_titles), results_df], ignore_index=True)
-        
+        # Replace with:
+        if not matched_titles:  # Only use fuzzy matches if no title matches
+            results_df = pd.concat([pd.DataFrame(matched_titles), results_df], ignore_index=True)
+
         if len(results_df) < 5:
             fallback_papers = self.get_fallback_recommendations(5 - len(results_df))
             results_df = pd.concat([results_df, fallback_papers], ignore_index=True)
