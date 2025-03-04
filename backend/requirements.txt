@@ -1,0 +1,15 @@
+fastapi[standard]
+uvicorn[standard]
+pandas
+numpy
+faiss-cpu
+sentence-transformers
+arxiv
+tenacity
+nltk
+bs4
+requests
+python-multipart
+pydantic
+beautifulsoup4
+fuzzywuzzy

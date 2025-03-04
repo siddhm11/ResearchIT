@@ -195,7 +195,14 @@ const ScrollableResearchView = ({ papers, onViewPaper, onAddToCompare }) => {
             <h3 className="paper-title" onClick={() => onViewPaper(paper)}>{paper.title}</h3>
             <div className="paper-meta-compact">
               <span className="meta-item">{new Date(paper.published).toLocaleDateString()}</span>
-              <span className="meta-item">{paper.authors?.slice(0, 3).join(', ') || 'Unknown'}{paper.authors?.length > 3 ? ', et al.' : ''}</span>
+              <span className="meta-item">
+                {paper.authors?.slice(0, 3).join(', ') || 'Unknown'}
+                {paper.authors?.length > 3 ? ', et al.' : ''}
+              </span>
+              <span className="meta-item">
+                <span className="meta-label">Similarity:</span> 
+                <span> {paper.similarity ? (paper.similarity * 100).toFixed(2) + "%" : "N/A"}</span>
+              </span>
             </div>
             <p className="paper-abstract-preview">{paper.abstract.substring(0, 150)}...</p>
           </div>
@@ -212,6 +219,7 @@ const ScrollableResearchView = ({ papers, onViewPaper, onAddToCompare }) => {
     </div>
   );
 };
+
 
 // Enhanced Search component
 const Search = ({ onAddToCompare }) => {

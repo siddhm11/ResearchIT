@@ -380,7 +380,7 @@ async def get_recommendations(
                 published=row['published'],
                 pdf_url=row.get('pdf_url'),
                 categories=row.get('categories', []),
-                similarity=similarity,
+                similarity=row['similarity_percent'],
                 quality_score=quality_score
             )
             papers.append(paper)

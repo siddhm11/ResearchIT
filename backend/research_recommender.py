@@ -734,13 +734,13 @@ class EmbeddingSystem:
             return None
 
     def recommend(self, 
-                 text: str = None, 
-                 paper_id: str = None,
-                 user_preferences: np.ndarray = None,
-                 k: int = 5, 
-                 filter_criteria: Dict = None,
-                 nprobe: int = 10,
-                 quality_assessor: Optional['PaperQualityAssessor'] = None) -> pd.DataFrame:
+              text: str = None, 
+              paper_id: str = None,
+              user_preferences: np.ndarray = None,
+              k: int = 5, 
+              filter_criteria: Dict = None,
+              nprobe: int = 10,
+              quality_assessor: Optional['PaperQualityAssessor'] = None) -> pd.DataFrame:
         """
         Get recommendations based on text, paper_id, or user preferences
         
@@ -756,39 +756,38 @@ class EmbeddingSystem:
         Returns:
             DataFrame with recommended papers and similarity scores
         """
-        results = [] 
         if not self.index_trained or self.index.ntotal == 0:
             logger.warning("Index not trained or empty. Cannot recommend papers.")
             return pd.DataFrame()
-            
-        # Set search parameters for better recall
-        if hasattr(self.index, 'nprobe'):  # Only set nprobe for IVF indices
+
+        if hasattr(self.index, 'nprobe'):  # Set nprobe only if using IVF index
             self.index.nprobe = nprobe
-        
+
         query_vector = None
         matched_titles = []
-        # Case 1: Text query
+        
+        # 🔹 Case 1: Text query
         if text:
             logger.info(f"Generating embedding for query text: {text[:50]}...")
             clean_text = self.preprocessor.clean_text(text).lower()
 
-            # Get all papers where the title is similar
+            # 🔹 Perform fuzzy matching with titles
             matched_titles = [
                 paper for paper in self.metadata.to_dict(orient="records")
                 if fuzz.ratio(clean_text, paper["title"].lower()) >= 60  # Adjust threshold as needed
             ]
 
-            
             # Sort fuzzy matches by highest similarity
             matched_titles.sort(key=lambda x: fuzz.ratio(clean_text, x["title"].lower()), reverse=True)
 
             if matched_titles:
                 logger.info(f"Found {len(matched_titles)} fuzzy matches for '{text}'")
-            
+
+            # 🔹 Encode query text into embedding vector
             query_vector = self.model.encode([clean_text])[0].astype('float32').reshape(1, -1)
             faiss.normalize_L2(query_vector)
-        
-        # Case 2: Paper ID query - using the fixed method
+
+        # 🔹 Case 2: Paper ID query
         elif paper_id:
             logger.info(f"Finding papers similar to paper_id: {paper_id}")
             query_vector = self.get_paper_embedding(paper_id)
@@ -797,104 +796,91 @@ class EmbeddingSystem:
                 logger.warning(f"Could not retrieve embedding for paper ID {paper_id}")
                 return pd.DataFrame()
 
-        # 🔹 Case 3: Search by User Preferences
+        # 🔹 Case 3: User Preferences
         elif user_preferences is not None:
             logger.info("Using provided user preference vector for recommendations")
             query_vector = user_preferences.reshape(1, -1).astype('float32')
             faiss.normalize_L2(query_vector)
-        
+
         else:
             logger.error("No query provided. Please provide text, paper_id, or user_preferences.")
             return pd.DataFrame()
         
-        # Perform similarity search
-        # Get 2*k results initially to allow for filtering
-        # Merge fuzzy title matches with embedding-based recommendations
+        # 🔹 Perform FAISS similarity search
         num_results = min(2 * k, self.index.ntotal)
         scores, indices = self.index.search(query_vector, num_results)
 
-    # Convert to DataFrame for easier processing
-   
-        # Convert to DataFrame for easier processing
+        # 🔹 Convert FAISS results into DataFrame
         results_df = pd.DataFrame({
             'embedding_idx': indices[0],
             'similarity_score': scores[0]
         })
-        
-        # Join with metadata - using embedding_idx for both indices
+
+        # 🔹 Merge FAISS results with metadata
         results_with_metadata = []
         for _, row in results_df.iterrows():
             embedding_idx = int(row['embedding_idx'])
             metadata_matches = self.metadata[self.metadata['embedding_idx'] == embedding_idx]
-            
+
             if not metadata_matches.empty:
                 paper_data = metadata_matches.iloc[0].to_dict()
                 paper_data['similarity_score'] = row['similarity_score']
                 results_with_metadata.append(paper_data)
-        
+
         if not results_with_metadata:
             logger.warning("No metadata matches found for search results.")
             return pd.DataFrame()
-            
-        results_df = pd.DataFrame(results_with_metadata)
-        
-        # Replace with:
-        if not matched_titles:  # Only use fuzzy matches if no title matches
-            results_df = pd.concat([pd.DataFrame(matched_titles), results_df], ignore_index=True)
 
-        if len(results_df) < 5:
-            fallback_papers = self.get_fallback_recommendations(5 - len(results_df))
-            results_df = pd.concat([results_df, fallback_papers], ignore_index=True)
-        
-        
-        # If searching by paper_id, remove the query paper from results
-        if paper_id :
+        results_df = pd.DataFrame(results_with_metadata)
+
+        # 🔹 Merge fuzzy title matches **with FAISS results**, removing duplicates
+        if matched_titles:
+            fuzzy_df = pd.DataFrame(matched_titles)
+            results_df = pd.concat([fuzzy_df, results_df]).drop_duplicates(subset=['id']).reset_index(drop=True)
+
+        # 🔹 Ensure at least `k` results by using fallback recommendations
+        if len(results_df) < k:
+            logger.warning("Not enough results, fetching fallback recommendations.")
+            fallback_papers = self.get_fallback_recommendations(k - len(results_df))
+            results_df = pd.concat([results_df, fallback_papers]).reset_index(drop=True)
+
+        # 🔹 Remove the query paper from results if searching by paper_id
+        if paper_id:
             results_df = results_df[results_df['id'] != paper_id]
-        
-        # Apply filters if provided
+
+        # 🔹 Apply filters if provided
         if filter_criteria:
             for column, value in filter_criteria.items():
                 if column in results_df.columns:
                     if isinstance(value, list):
                         results_df = results_df[results_df[column].isin(value)]
                     elif isinstance(value, dict) and 'min' in value and 'max' in value:
-                        results_df = results_df[
-                            (results_df[column] >= value['min']) & 
-                            (results_df[column] <= value['max'])
-                        ]
+                        results_df = results_df[(results_df[column] >= value['min']) & (results_df[column] <= value['max'])]
                     elif isinstance(value, dict) and 'after' in value:
                         results_df = results_df[results_df[column] >= value['after']]
                     elif isinstance(value, dict) and 'before' in value:
                         results_df = results_df[results_df[column] <= value['before']]
                     else:
                         results_df = results_df[results_df[column] == value]
-        
-        # Apply quality assessment if provided
+
+        # 🔹 Apply quality assessment if enabled
         if quality_assessor and not results_df.empty:
             logger.info("Applying quality assessment to recommendations...")
-            quality_scores = []
-            for _, paper in results_df.iterrows():
-                quality_score = quality_assessor.assess_paper_quality(paper)
-                quality_scores.append(quality_score)
-            
-            results_df['quality_score'] = quality_scores
+            results_df['quality_score'] = results_df.apply(lambda paper: quality_assessor.assess_paper_quality(paper), axis=1)
             
             similarity_weight = 0.7  # 70% weight for similarity
-            quality_weight = 0.3    
-            # Use parameterized weights
-            results_df['combined_score'] = (
-                similarity_weight * results_df['similarity_score'] + 
-                quality_weight * results_df['quality_score']
-            )
+            quality_weight = 0.3  # 30% weight for quality
             
-            # Sort by combined score
+            results_df['combined_score'] = (similarity_weight * results_df['similarity_score']) + (quality_weight * results_df['quality_score'])
             results_df = results_df.sort_values('combined_score', ascending=False)
-        
         else:
-            # Sort by similarity score only
             results_df = results_df.sort_values('similarity_score', ascending=False)
-        # Return top k results (or fewer if not enough results)
+
+        # 🔹 Normalize similarity score to percentage
+        results_df['similarity_percent'] = (results_df['similarity_score'] * 100).round(2)
+
         return results_df.head(k)
+
     
      
 class ResearchRecommender:
@@ -910,50 +896,62 @@ class ResearchRecommender:
         self.citation_fetcher = CitationFetcher()
         self.quality_assessor = PaperQualityAssessor(citation_fetcher=self.citation_fetcher)
         
-    def fetch_and_index(self, query: str = "cat:cs.LG", max_results: int = 100, date_start: Optional[str] = None, date_end: Optional[str] = None, sort_by: arxiv.SortCriterion = arxiv.SortCriterion.Relevance) -> pd.DataFrame:
-        papers = self.fetcher.fetch(query=query, max_results=max_results, date_start=date_start, date_end=date_end, sort_by=sort_by)
+    def fetch_and_index(self, query: str = None, keywords: List[str] = None, categories: List[str] = None, max_results: int = 100):
+        """Improved search function with fallback queries"""
+        
+        if keywords:
+            query = " OR ".join([f'all:"{kw}"' for kw in keywords])
+            
+        if categories:
+            cat_query = " OR ".join([f'cat:{cat}' for cat in categories])
+            query = f"({query}) AND ({cat_query})"
+
+        logger.info(f"Fetching papers with query: {query}")
+
+        papers = self.fetcher.fetch(query=query, max_results=max_results)
+        
+        if papers.empty:
+            logger.warning("⚠️ No papers found! Expanding search...")
+            # Retry with broader query
+            query = query.replace('"', '')  # Remove strict quotes
+            papers = self.fetcher.fetch(query=query, max_results=max_results)
 
         if papers.empty:
-            logger.warning("⚠️ No papers retrieved, skipping indexing.")
-            return pd.DataFrame()  # Return early to avoid errors
-
-        logger.info(f"📌 Processing {len(papers)} papers for embedding...")
+            logger.error("❌ Still no results. Try different keywords/categories.")
+            return pd.DataFrame()
+        
         self.embedding_system.process_papers(papers)
-
         return papers
 
     
-    def fetch_by_keywords(self,
-                         keywords: List[str],
-                         categories: List[str] = None,
-                         max_results: int = 100,
-                         date_start: Optional[str] = None, 
-                         date_end: Optional[str] = None) -> pd.DataFrame:
-        """
-        Fetch papers by keywords and categories
-        
-        Args:
-            keywords: List of keywords to search for
-            categories: List of arXiv categories
-            max_results: Maximum papers to fetch
-            date_start: Start date (YYYY-MM-DD)
-            date_end: End date (YYYY-MM-DD)
-            
-        Returns:
-            DataFrame with papers
-        """
-        papers = self.fetcher.search_by_keywords(
-            keywords=keywords,
-            categories=categories,
-            max_results=max_results,
-            date_start=date_start,
-            date_end=date_end
-        )
-        
-        if not papers.empty:
-            self.embedding_system.process_papers(papers)
-            
+    def fetch_and_index(self, query: str = None, keywords: List[str] = None, categories: List[str] = None, 
+                    max_results: int = 100, date_start: Optional[str] = None, date_end: Optional[str] = None):
+        """Improved search function with optional date filtering"""
+
+        if keywords:
+            query = " OR ".join([f'all:"{kw}"' for kw in keywords])
+
+        if categories:
+            cat_query = " OR ".join([f'cat:{cat}' for cat in categories])
+            query = f"({query}) AND ({cat_query})"
+
+        logger.info(f"Fetching papers with query: {query}")
+
+        # Now passing date_start and date_end correctly to fetch()
+        papers = self.fetcher.fetch(query=query, max_results=max_results, date_start=date_start, date_end=date_end)
+
+        if papers.empty:
+            logger.warning("⚠️ No papers found! Expanding search...")
+            query = query.replace('"', '')  # Remove strict quotes
+            papers = self.fetcher.fetch(query=query, max_results=max_results, date_start=date_start, date_end=date_end)
+
+        if papers.empty:
+            logger.error("❌ Still no results. Try different keywords/categories.")
+            return pd.DataFrame()
+
+        self.embedding_system.process_papers(papers)
         return papers
+
         
     def find_seminal_papers(self, topic: str, max_results: int = 10) -> pd.DataFrame:
         """Find potentially seminal/highly-cited papers on a topic"""
