@@ -1,0 +1,16 @@
+# Ignore Python cache files
+__pycache__/
+*.pyc
+
+# Ignore virtual environment
+venv/
+
+# Ignore research index and other generated files
+backend/research_index/
+backend/logs/
+*.pkl
+*.json
+*.sqlite
+
+# Ignore node_modules (if using npm in frontend)
+node_modules/
